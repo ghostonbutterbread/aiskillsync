@@ -96,13 +96,19 @@ sync:
 
 ## CLI
 
-MVP command shape:
+Implemented Phase 1/2 command shape:
 
 ```bash
 aiskillsync init
 aiskillsync config
+aiskillsync config --default
 aiskillsync list
 aiskillsync doctor
+```
+
+Reserved future command shape:
+
+```bash
 aiskillsync sync all
 aiskillsync sync bounty-harness
 aiskillsync sync 1 2
@@ -144,10 +150,13 @@ Checks:
 - config exists and parses
 - bridge names are unique
 - destination names are unique
-- local paths exist or are cloneable
+- enabled bridge local paths exist or are cloneable
+- enabled bridge `skills_path` exists when the bridge local path already exists
 - enabled bridges have `skills_path`
 - each skill dir has `SKILL.md`
 - duplicate skill names across enabled bridges are reported as conflicts
+- disabled bridge-local checks are labeled `SKIP` unless a global check affects
+  the command exit status
 - destination entries are classified:
   - already linked to correct source
   - missing
@@ -156,6 +165,8 @@ Checks:
   - non-directory path conflict
 
 ### `sync`
+
+Future placeholder. Not implemented in Phase 1/2.
 
 Synchronizes selected bridges into selected destinations.
 
@@ -221,8 +232,11 @@ Acceptance:
 ```bash
 python3 -m aiskillsync --help
 python3 -m aiskillsync init --dry-run
-python3 -m aiskillsync config
+python3 -m aiskillsync config --default
 ```
+
+Plain `python3 -m aiskillsync config` remains strict and requires an existing
+config file.
 
 ### Phase 2 — Discovery and doctor
 
@@ -290,6 +304,22 @@ cd ~/projects/bug_bounty_harness
 ```
 
 still works and delegates to `aiskillsync`.
+
+### Phase 6 — Bridge config management
+
+Future placeholder for `add` and `remove`.
+
+Deliverables:
+
+- `aiskillsync add <name> <repo> --path <local-path> --skills-path skills --branch main`
+- `aiskillsync remove <name>`
+- no-overwrite config edits with clear diffs or dry-run output
+
+Acceptance:
+
+- Can add a disabled or enabled bridge entry without corrupting existing config.
+- Can remove a bridge entry by name without touching local repos or destination
+  skill directories.
 
 ## Open design decisions
 
