@@ -17,6 +17,9 @@ python3 -m aiskillsync config --default
 python3 -m aiskillsync config
 python3 -m aiskillsync list
 python3 -m aiskillsync doctor
+python3 -m aiskillsync sync all
+python3 -m aiskillsync sync bounty-harness --dest codex --dest claude
+python3 -m aiskillsync sync 1 2 --apply
 ```
 
 Use `--config` to point at a non-default config:
@@ -24,6 +27,7 @@ Use `--config` to point at a non-default config:
 ```bash
 python3 -m aiskillsync --config ./config.yaml list
 python3 -m aiskillsync --config ./config.yaml doctor
+python3 -m aiskillsync --config ./config.yaml sync all --dry-run
 ```
 
 `init` writes `~/.config/aiskillsync/config.yaml` unless `--dry-run` is used.
@@ -33,19 +37,24 @@ It will not overwrite an existing config unless `--force` is passed.
 `config --default` or `config --show-default` to preview the default template
 without creating or loading a config.
 
-The current implementation covers Phase 1 and Phase 2 from
+The current implementation covers Phase 1, Phase 2, and Phase 3 from
 `docs/AISKILLSYNC_SPEC.md`:
 
 - config loading with `~` and environment variable path expansion
 - bridge and skill discovery
 - destination classification
 - `list` and `doctor` reporting
+- safe dry-run sync planning
+- optional `sync --apply` creation of missing symlinks only
 
-Filesystem mutation for syncing is not implemented yet. The only write-capable
-command is `init`, and it only writes the config file.
+`sync` is dry-run by default. `--apply` is intentionally narrow in Phase 3: it
+only creates destination symlinks that are missing. Existing correct symlinks
+are skipped, and existing directories, files, or symlinks to unexpected targets
+are conflicts that block the whole apply. It does not delete, adopt, back up, or
+replace existing entries; those behaviors are reserved for Phase 4.
 
 Reserved future commands are tracked in the spec but intentionally not exposed
-yet: `sync`, `add`, and `remove`.
+yet: `add` and `remove`.
 
 ## Config
 
@@ -97,6 +106,26 @@ names, and destination entries are classified as missing, already linked,
 regular directory/copy, unexpected symlink, or path conflict. Disabled bridge
 checks are reported as `SKIP` unless a global check, such as duplicate bridge
 names, still affects the exit status.
+
+## Sync Command
+
+`sync` selects bridges by name, by `all`, or by the 1-based indexes shown in
+`list` output:
+
+```bash
+python3 -m aiskillsync sync all
+python3 -m aiskillsync sync bounty-harness
+python3 -m aiskillsync sync 1 2
+```
+
+Destinations come from repeated `--dest` flags or, when omitted,
+`sync.default_destinations` in the config. Ghost/OpenClaw is not touched unless
+it is explicitly selected with `--dest ghost` or included in
+`sync.default_destinations`.
+
+Only `sync.mode: symlink` is supported. `pull_before_sync` and
+`clone_if_missing` are reported as planned work only in Phase 3; `sync` does not
+run network or git mutations.
 
 ## Verification
 

@@ -52,6 +52,49 @@ sync:
             encoding="utf-8",
         )
 
+    def write_phase3_config(
+        self,
+        path: Path,
+        bridges: list[tuple[str, Path]],
+        destinations: dict[str, Path],
+        *,
+        mode: str = "symlink",
+        default_destinations: tuple[str, ...] = ("codex",),
+    ) -> None:
+        bridge_lines = ["bridges:"]
+        for name, bridge_path in bridges:
+            bridge_lines.extend(
+                [
+                    f"  - name: {name}",
+                    f"    path: {bridge_path}",
+                    "    skills_path: skills",
+                    "    enabled: true",
+                ]
+            )
+        dest_lines = ["ai_skill_paths:"]
+        for name, dest_path in destinations.items():
+            dest_lines.append(f"  {name}: {dest_path}")
+        default_lines = ["  default_destinations:"]
+        for name in default_destinations:
+            default_lines.append(f"    - {name}")
+        path.write_text(
+            "\n".join(
+                [
+                    *bridge_lines,
+                    "",
+                    *dest_lines,
+                    "",
+                    "sync:",
+                    f"  mode: {mode}",
+                    "  pull_before_sync: false",
+                    "  clone_if_missing: false",
+                    *default_lines,
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
     def test_init_dry_run(self) -> None:
         result = self.run_cli("init", "--dry-run")
 
@@ -220,6 +263,239 @@ sync:
         self.assertNotIn("FAIL", result.stdout)
         self.assertIn("SKIP bridge disabled-bridge: disabled", result.stdout)
         self.assertIn("disabled skill dirs missing SKILL.md", result.stdout)
+
+    def test_sync_selects_bridge_by_name_and_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge_a = base / "bridge-a"
+            bridge_b = base / "bridge-b"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge_a / "skills", "alpha")
+            self.write_skill(bridge_b / "skills", "beta")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("first", bridge_a), ("second", bridge_b)],
+                {"codex": codex},
+            )
+
+            by_index = self.run_cli("--config", str(config), "sync", "2", "--dest", "codex")
+            by_name = self.run_cli("--config", str(config), "sync", "first", "--dest", "codex")
+
+        self.assertEqual(by_index.returncode, 0, by_index.stdout + by_index.stderr)
+        self.assertIn("Bridges: second", by_index.stdout)
+        self.assertIn("codex:beta", by_index.stdout)
+        self.assertNotIn("codex:alpha", by_index.stdout)
+        self.assertEqual(by_name.returncode, 0, by_name.stdout + by_name.stderr)
+        self.assertIn("Bridges: first", by_name.stdout)
+        self.assertIn("codex:alpha", by_name.stdout)
+        self.assertNotIn("codex:beta", by_name.stdout)
+
+    def test_sync_dry_run_does_not_mutate_and_dest_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            claude = base / "claude"
+            ghost = base / "ghost"
+            codex.mkdir()
+            claude.mkdir()
+            ghost.mkdir()
+            self.write_skill(bridge / "skills", "only-skill")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex, "claude": claude, "ghost": ghost},
+                default_destinations=("codex", "claude"),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all", "--dest", "codex")
+            codex_exists = (codex / "only-skill").exists()
+            claude_exists = (claude / "only-skill").exists()
+            ghost_exists = (ghost / "only-skill").exists()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Sync plan (dry-run)", result.stdout)
+        self.assertIn("LINK codex:only-skill", result.stdout)
+        self.assertNotIn("claude:only-skill", result.stdout)
+        self.assertNotIn("ghost:only-skill", result.stdout)
+        self.assertFalse(codex_exists)
+        self.assertFalse(claude_exists)
+        self.assertFalse(ghost_exists)
+
+    def test_sync_apply_creates_only_missing_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            claude = base / "claude"
+            codex.mkdir()
+            claude.mkdir()
+            skill = self.write_skill(bridge / "skills", "sync-me")
+            (claude / "sync-me").symlink_to(skill, target_is_directory=True)
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex, "claude": claude},
+                default_destinations=("codex", "claude"),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all", "--apply")
+            codex_link = codex / "sync-me"
+            claude_link = claude / "sync-me"
+
+            codex_target = codex_link.resolve() if codex_link.is_symlink() else None
+            claude_target = claude_link.resolve() if claude_link.is_symlink() else None
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("LINK codex:sync-me", result.stdout)
+        self.assertIn("SKIP claude:sync-me", result.stdout)
+        self.assertIn("Created symlinks:", result.stdout)
+        self.assertEqual(codex_target, skill.resolve())
+        self.assertEqual(claude_target, skill.resolve())
+
+    def test_sync_conflict_blocks_apply_and_creates_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            claude = base / "claude"
+            codex.mkdir()
+            claude.mkdir()
+            self.write_skill(bridge / "skills", "blocked")
+            (codex / "blocked").mkdir()
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex, "claude": claude},
+                default_destinations=("codex", "claude"),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all", "--apply")
+            claude_exists = (claude / "blocked").exists()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONFLICT codex:blocked", result.stdout)
+        self.assertIn("Apply blocked", result.stdout)
+        self.assertFalse(claude_exists)
+
+    def test_sync_duplicate_destination_roots_block_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            shared = base / "shared-dest"
+            shared.mkdir()
+            self.write_skill(bridge / "skills", "dupe-root")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": shared, "mirror": shared},
+                default_destinations=("codex", "mirror"),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all", "--apply")
+            created = (shared / "dupe-root").exists()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("ERROR selected destinations share root path", result.stdout)
+        self.assertIn("codex, mirror", result.stdout)
+        self.assertIn("Apply blocked", result.stdout)
+        self.assertFalse(created)
+
+    def test_sync_missing_cloneable_bridge_blocks_apply_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            existing_bridge = base / "existing-bridge"
+            missing_bridge = base / "missing-bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(existing_bridge / "skills", "present-skill")
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: existing
+    path: {existing_bridge}
+    skills_path: skills
+    enabled: true
+  - name: cloneable
+    repo: https://example.invalid/cloneable.git
+    path: {missing_bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all", "--apply")
+            created = (codex / "present-skill").exists()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("PLAN bridge cloneable: clone-if-missing is configured", result.stdout)
+        self.assertIn("ERROR bridge cloneable: local path missing", result.stdout)
+        self.assertIn("Apply blocked", result.stdout)
+        self.assertFalse(created)
+
+    def test_sync_destination_root_ancestor_conflict_blocks_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            good = base / "good"
+            blocker = base / "blocker"
+            blocker.write_text("not a directory", encoding="utf-8")
+            self.write_skill(bridge / "skills", "ancestor-conflict")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"bad": blocker / "child", "good": good},
+                default_destinations=("bad", "good"),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all", "--apply")
+            good_created = (good / "ancestor-conflict").exists()
+            blocker_is_file = blocker.is_file()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("ERROR destination bad: root path has non-directory ancestor", result.stdout)
+        self.assertIn(str(blocker), result.stdout)
+        self.assertIn("Apply blocked", result.stdout)
+        self.assertFalse(good_created)
+        self.assertTrue(blocker_is_file)
+
+    def test_sync_unsupported_mode_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "skill")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex},
+                mode="copy",
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsupported sync.mode", result.stderr)
 
 
 if __name__ == "__main__":
