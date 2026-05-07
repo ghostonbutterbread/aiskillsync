@@ -84,8 +84,20 @@ def default_config_path() -> Path:
     return expand_path(DEFAULT_CONFIG_PATH)
 
 
+def ensure_default_config() -> Path:
+    config_path = default_config_path()
+    if config_path.exists():
+        return config_path
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"could not create default config {config_path}: {exc}") from exc
+    return config_path
+
+
 def load_config(path: str | Path | None = None) -> Config:
-    config_path = expand_path(path) if path is not None else default_config_path()
+    config_path = expand_path(path) if path is not None else ensure_default_config()
     if not config_path.exists():
         raise ConfigError(f"config does not exist: {config_path}")
     if not config_path.is_file():

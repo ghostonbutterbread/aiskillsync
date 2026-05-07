@@ -30,12 +30,15 @@ python3 -m aiskillsync --config ./config.yaml doctor
 python3 -m aiskillsync --config ./config.yaml sync all --dry-run
 ```
 
+On first run, normal commands that use the default config path create
+`~/.config/aiskillsync/config.yaml` from the built-in template before loading
+it. Explicit `--config` paths remain strict and must already exist.
+
 `init` writes `~/.config/aiskillsync/config.yaml` unless `--dry-run` is used.
 It will not overwrite an existing config unless `--force` is passed.
 
-`config` is strict and requires an existing config file. Use
-`config --default` or `config --show-default` to preview the default template
-without creating or loading a config.
+Use `config --default` or `config --show-default` to preview the default
+template without creating or loading a config.
 
 The current implementation covers Phase 1, Phase 2, and Phase 3 from
 `docs/AISKILLSYNC_SPEC.md`:
@@ -91,6 +94,10 @@ sync:
 
 The MVP parser supports the simple YAML shape above and intentionally avoids
 external Python packages.
+
+When `--config` is omitted and the default config file is missing, `config`,
+`list`, `doctor`, and `sync` create the parent directories and write this
+template before loading it. `config --default` only prints the template.
 
 ## Discovery Commands
 

@@ -126,6 +126,18 @@ Behavior:
 - Prompt for first bridge, or create an empty config.
 - Do not overwrite an existing config unless `--force` is passed.
 
+### First-run default config
+
+When `--config` is omitted and `~/.config/aiskillsync/config.yaml` is missing,
+normal config-loading commands create the parent directories, write the default
+template, and then load it. This applies to `config`, `list`, `doctor`, and
+`sync`.
+
+Explicit `--config` paths stay strict and must already exist.
+
+`config --default` / `config --show-default` only prints the template and does
+not create or load a config file.
+
 ### `list`
 
 Shows configured bridges and discovered skills.
@@ -249,8 +261,8 @@ python3 -m aiskillsync init --dry-run
 python3 -m aiskillsync config --default
 ```
 
-Plain `python3 -m aiskillsync config` remains strict and requires an existing
-config file.
+Plain `python3 -m aiskillsync config` creates the default config on first run
+when `--config` is omitted. Explicit `--config` paths remain strict.
 
 ### Phase 2 — Discovery and doctor
 
