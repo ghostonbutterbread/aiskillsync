@@ -104,6 +104,9 @@ aiskillsync config
 aiskillsync config --default
 aiskillsync list
 aiskillsync doctor
+aiskillsync sync main
+aiskillsync sync codex --repo bounty-harness
+aiskillsync sync openclaw --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
 aiskillsync sync all
 aiskillsync sync bounty-harness --dest codex --dest claude
 aiskillsync sync 1 2 --apply
@@ -183,6 +186,12 @@ Synchronizes selected bridges into selected destinations.
 Examples:
 
 ```bash
+aiskillsync sync main
+aiskillsync sync codex
+aiskillsync sync claude --repo bounty-harness
+aiskillsync sync ghost --repo bounty-harness
+aiskillsync sync openclaw --repo bounty-harness
+aiskillsync sync codex --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
 aiskillsync sync all
 aiskillsync sync bounty-harness
 aiskillsync sync 1 2
@@ -199,6 +208,24 @@ aiskillsync sync all --adopt
 Default behavior:
 
 - dry-run unless `--apply` is passed.
+- Destination-first syntax is preferred:
+  - `main` selects `codex` and `claude`.
+  - `codex` selects only the Codex destination.
+  - `claude` selects only the Claude destination.
+  - `ghost` and `openclaw` are aliases for the Ghost/OpenClaw destination.
+  - `all` selects all configured destinations when paired with `--repo`.
+- Repo selection defaults to all configured bridges.
+- `--repo` is repeatable and selects configured bridges by name or repo URL.
+- If a `--repo` URL matches a configured bridge URL, the configured bridge path,
+  skills path, and branch are used; no duplicate ad-hoc clone is created.
+- If a `--repo` URL is not configured, aiskillsync creates an ad-hoc in-memory
+  bridge for that run only. The clone path is deterministic:
+  `${XDG_CACHE_HOME:-~/.cache}/aiskillsync/repos/<repo-slug>-<url-hash>`.
+  Existing paths are never deleted or replaced; normal bridge path validation
+  and git safety checks apply.
+- Legacy bridge-first syntax remains supported. `sync all` with no `--repo`
+  still means all bridges into `sync.default_destinations`, and `--dest` remains
+  a repeatable legacy destination filter.
 - Dry-run reports planned clone and pull work but does not run git or mutate the
   filesystem.
 - Apply clones a missing selected enabled bridge root when `bridge.repo` exists
@@ -310,6 +337,10 @@ Implemented Phase 3 scope:
 - `sync` selects bridges by name, `all`, or 1-based list indexes.
 - `--dest` is repeatable; omitted destinations come from
   `sync.default_destinations`.
+- Destination-first groups `main`, `codex`, `claude`, `ghost`/`openclaw`, and
+  `all` are implemented.
+- `--repo` is repeatable and accepts configured bridge names, configured repo
+  URLs, or unconfigured ad-hoc repo URLs.
 - `sync.mode` must be `symlink`.
 - Dry-run is the default behavior.
 - `--apply` creates only missing destination symlinks and skips already-correct

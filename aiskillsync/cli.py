@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
+from urllib.parse import urlparse
 
 from . import __version__
 from .config import (
+    BridgeConfig,
     Config,
     ConfigError,
     DEFAULT_CONFIG_TEXT,
@@ -34,6 +39,18 @@ from .sync import (
     build_sync_plan,
     materialize_repositories_for_sync,
 )
+
+
+DESTINATION_GROUPS = ("main", "codex", "claude", "ghost", "openclaw", "all")
+
+
+@dataclass(frozen=True)
+class SyncRequest:
+    config: Config
+    repo_selectors: tuple[str, ...]
+    destinations: tuple[str, ...]
+    notices: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,17 +87,37 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="validate config and filesystem state")
     doctor_parser.set_defaults(func=cmd_doctor)
 
-    sync_parser = subparsers.add_parser("sync", help="plan or apply skill symlinks")
+    sync_parser = subparsers.add_parser(
+        "sync",
+        help="plan or apply skill symlinks",
+        description=(
+            "Plan or apply skill symlinks. Preferred syntax is destination-first: "
+            "sync main, sync codex --repo bounty-harness, sync openclaw --repo <url>. "
+            "Legacy bridge-first syntax remains supported with --dest."
+        ),
+    )
     sync_parser.add_argument(
-        "selectors",
-        nargs="+",
-        help="bridge names, 1-based bridge indexes from list output, or all",
+        "terms",
+        nargs="*",
+        help=(
+            "destination groups (main, codex, claude, ghost/openclaw, all) "
+            "or legacy bridge selectors"
+        ),
     )
     sync_parser.add_argument(
         "--dest",
         action="append",
         default=[],
-        help="destination name to sync; repeat for multiple destinations",
+        help="legacy destination name to sync; repeat for multiple destinations",
+    )
+    sync_parser.add_argument(
+        "--repo",
+        action="append",
+        default=[],
+        help=(
+            "configured bridge/repo name or repo URL to sync; repeat for multiple repos. "
+            "Unconfigured URLs are cloned under the aiskillsync cache on apply."
+        ),
     )
     mode_group = sync_parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -244,19 +281,20 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         )
         return 2
 
+    request = _resolve_sync_request(config, args)
     dry_run = not args.apply
     materialization = materialize_repositories_for_sync(
-        config,
-        tuple(args.selectors),
+        request.config,
+        request.repo_selectors,
         dry_run=dry_run,
     )
     plan = build_sync_plan(
-        config,
-        tuple(args.selectors),
-        tuple(args.dest),
+        request.config,
+        request.repo_selectors,
+        request.destinations,
         dry_run=dry_run,
-        preflight_notices=materialization.notices,
-        preflight_errors=materialization.errors,
+        preflight_notices=(*request.notices, *materialization.notices),
+        preflight_errors=(*request.errors, *materialization.errors),
     )
     _print_sync_plan(plan, stdout)
 
@@ -283,6 +321,144 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
 def _load_config(args: argparse.Namespace) -> Config:
     return load_config(args.config)
+
+
+def _resolve_sync_request(config: Config, args: argparse.Namespace) -> SyncRequest:
+    terms = tuple(args.terms)
+    repo_options = tuple(args.repo)
+
+    if args.dest:
+        return _with_adhoc_repositories(
+            config,
+            (*terms, *repo_options) or ("all",),
+            tuple(args.dest),
+        )
+
+    if terms == ("all",) and not repo_options:
+        return _with_adhoc_repositories(config, ("all",), ())
+
+    destination_terms: list[str] = []
+    positional_repos: list[str] = []
+    for term in terms:
+        if term in DESTINATION_GROUPS:
+            destination_terms.append(term)
+        else:
+            positional_repos.append(term)
+
+    if destination_terms:
+        destinations = _expand_destination_groups(config, tuple(destination_terms))
+        repo_selectors = (*repo_options, *positional_repos) or ("all",)
+        return _with_adhoc_repositories(config, repo_selectors, destinations)
+
+    repo_selectors = (*repo_options, *terms) or ("all",)
+    return _with_adhoc_repositories(config, repo_selectors, ())
+
+
+def _expand_destination_groups(config: Config, groups: tuple[str, ...]) -> tuple[str, ...]:
+    destinations: list[str] = []
+    for group in groups:
+        if group == "main":
+            candidates = ("codex", "claude")
+        elif group == "openclaw":
+            candidates = ("ghost",) if "ghost" in config.ai_skill_paths else ("openclaw",)
+        elif group == "ghost":
+            candidates = ("ghost",) if "ghost" in config.ai_skill_paths else ("openclaw",)
+        elif group == "all":
+            candidates = tuple(config.ai_skill_paths)
+        else:
+            candidates = (group,)
+        for candidate in candidates:
+            if candidate not in destinations:
+                destinations.append(candidate)
+    return tuple(destinations)
+
+
+def _with_adhoc_repositories(
+    config: Config,
+    selectors: tuple[str, ...],
+    destinations: tuple[str, ...],
+) -> SyncRequest:
+    bridges = list(config.bridges)
+    resolved_selectors: list[str] = []
+    notices: list[str] = []
+
+    for selector in selectors:
+        if not _looks_like_repo_url(selector) or _configured_repo_url(config, selector):
+            resolved_selectors.append(selector)
+            continue
+
+        bridge = _adhoc_bridge_for_url(selector)
+        bridges.append(bridge)
+        resolved_selectors.append(bridge.name)
+        notices.append(
+            f"ADHOC bridge {bridge.name}: {bridge.repo} -> {bridge.path}"
+        )
+
+    if len(bridges) == len(config.bridges):
+        resolved_config = config
+    else:
+        resolved_config = Config(
+            path=config.path,
+            bridges=tuple(bridges),
+            ai_skill_paths=config.ai_skill_paths,
+            sync=config.sync,
+        )
+    return SyncRequest(
+        config=resolved_config,
+        repo_selectors=tuple(resolved_selectors),
+        destinations=destinations,
+        notices=tuple(notices),
+    )
+
+
+def _configured_repo_url(config: Config, repo_url: str) -> bool:
+    normalized = _normalize_repo_url(repo_url)
+    return any(
+        bridge.repo is not None and _normalize_repo_url(bridge.repo) == normalized
+        for bridge in config.bridges
+    )
+
+
+def _looks_like_repo_url(value: str) -> bool:
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https", "ssh", "git", "file"}:
+        return True
+    return "@" in value and ":" in value
+
+
+def _normalize_repo_url(value: str) -> str:
+    return value.strip().rstrip("/")
+
+
+def _adhoc_bridge_for_url(repo_url: str) -> BridgeConfig:
+    normalized = _normalize_repo_url(repo_url)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    slug = _repo_slug(normalized)
+    name = f"{slug}-{digest}"
+    return BridgeConfig(
+        name=name,
+        repo=repo_url,
+        path=_default_repo_cache_dir() / name,
+        skills_path="skills",
+        branch=None,
+        enabled=True,
+    )
+
+
+def _repo_slug(repo_url: str) -> str:
+    parsed = urlparse(repo_url)
+    tail = Path(parsed.path).name if parsed.path else repo_url.rsplit("/", 1)[-1]
+    if tail.endswith(".git"):
+        tail = tail[:-4]
+    slug = "".join(char.lower() if char.isalnum() else "-" for char in tail).strip("-")
+    return slug or "repo"
+
+
+def _default_repo_cache_dir() -> Path:
+    root = os.environ.get("XDG_CACHE_HOME")
+    if root:
+        return expand_path(root) / "aiskillsync" / "repos"
+    return expand_path("~/.cache/aiskillsync/repos")
 
 
 def _print_bridge_name_checks(duplicates: tuple[str, ...], stdout: TextIO) -> None:

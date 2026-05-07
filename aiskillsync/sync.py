@@ -229,12 +229,16 @@ def select_bridges(
                 continue
             candidate = discoveries[index - 1]
         else:
-            matches = [item for item in discoveries if item.bridge.name == selector]
+            matches = [
+                item
+                for item in discoveries
+                if _bridge_matches_selector(item.bridge, selector)
+            ]
             if not matches:
                 errors.append(f"unknown bridge selector: {selector}")
                 continue
             if len(matches) > 1:
-                errors.append(f"ambiguous bridge name: {selector}")
+                errors.append(f"ambiguous bridge selector: {selector}")
                 continue
             candidate = matches[0]
         if candidate not in selected:
@@ -262,12 +266,12 @@ def select_bridge_configs(
                 continue
             candidate = bridges[index - 1]
         else:
-            matches = [item for item in bridges if item.name == selector]
+            matches = [item for item in bridges if _bridge_matches_selector(item, selector)]
             if not matches:
                 errors.append(f"unknown bridge selector: {selector}")
                 continue
             if len(matches) > 1:
-                errors.append(f"ambiguous bridge name: {selector}")
+                errors.append(f"ambiguous bridge selector: {selector}")
                 continue
             candidate = matches[0]
         if candidate not in selected:
@@ -282,14 +286,35 @@ def select_destinations(
     selected: list[str] = []
     errors: list[str] = []
     for name in requested:
-        if name not in config.ai_skill_paths:
+        destination = _resolve_destination_alias(config, name)
+        if destination not in config.ai_skill_paths:
             errors.append(f"unknown destination: {name}")
             continue
-        if name not in selected:
-            selected.append(name)
+        if destination not in selected:
+            selected.append(destination)
     if not selected and not errors:
         errors.append("no destinations selected")
     return tuple(selected), tuple(errors)
+
+
+def _resolve_destination_alias(config: Config, name: str) -> str:
+    if name == "openclaw" and "ghost" in config.ai_skill_paths:
+        return "ghost"
+    if name == "ghost" and "ghost" not in config.ai_skill_paths and "openclaw" in config.ai_skill_paths:
+        return "openclaw"
+    return name
+
+
+def _bridge_matches_selector(bridge: BridgeConfig, selector: str) -> bool:
+    if bridge.name == selector:
+        return True
+    if bridge.repo is None:
+        return False
+    return _normalize_repo_url(bridge.repo) == _normalize_repo_url(selector)
+
+
+def _normalize_repo_url(value: str) -> str:
+    return value.strip().rstrip("/")
 
 
 def apply_sync_plan(plan: SyncPlan) -> tuple[str, ...]:

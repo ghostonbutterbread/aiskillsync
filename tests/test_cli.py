@@ -391,6 +391,209 @@ sync:
         self.assertIn("codex:alpha", by_name.stdout)
         self.assertNotIn("codex:beta", by_name.stdout)
 
+    def test_sync_main_destination_group_selects_codex_and_claude(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            claude = base / "claude"
+            ghost = base / "ghost"
+            codex.mkdir()
+            claude.mkdir()
+            ghost.mkdir()
+            self.write_skill(bridge / "skills", "main-skill")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex, "claude": claude, "ghost": ghost},
+                default_destinations=("codex",),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "main")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Destinations: codex, claude", result.stdout)
+        self.assertIn("LINK codex:main-skill", result.stdout)
+        self.assertIn("LINK claude:main-skill", result.stdout)
+        self.assertNotIn("ghost:main-skill", result.stdout)
+
+    def test_sync_codex_destination_group_selects_codex_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            claude = base / "claude"
+            codex.mkdir()
+            claude.mkdir()
+            self.write_skill(bridge / "skills", "codex-skill")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex, "claude": claude},
+                default_destinations=("codex", "claude"),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "codex")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Destinations: codex", result.stdout)
+        self.assertIn("LINK codex:codex-skill", result.stdout)
+        self.assertNotIn("claude:codex-skill", result.stdout)
+
+    def test_sync_openclaw_destination_group_aliases_ghost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            ghost = base / "ghost"
+            codex.mkdir()
+            ghost.mkdir()
+            self.write_skill(bridge / "skills", "ghost-skill")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex, "ghost": ghost},
+                default_destinations=("codex",),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "openclaw")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Destinations: ghost", result.stdout)
+        self.assertIn("LINK ghost:ghost-skill", result.stdout)
+        self.assertNotIn("codex:ghost-skill", result.stdout)
+
+    def test_sync_repo_option_selects_configured_bridge_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge_a = base / "bridge-a"
+            bridge_b = base / "bridge-b"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge_a / "skills", "alpha")
+            self.write_skill(bridge_b / "skills", "beta")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("first", bridge_a), ("second", bridge_b)],
+                {"codex": codex},
+            )
+
+            result = self.run_cli(
+                "--config", str(config), "sync", "codex", "--repo", "second"
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Bridges: second", result.stdout)
+        self.assertIn("LINK codex:beta", result.stdout)
+        self.assertNotIn("codex:alpha", result.stdout)
+
+    def test_sync_repo_option_url_reuses_configured_bridge_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "url-skill")
+            repo_url = "https://example.invalid/configured.git"
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: configured
+    repo: {repo_url}
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config", str(config), "sync", "codex", "--repo", repo_url
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Bridges: configured", result.stdout)
+        self.assertIn(f"LINK codex:url-skill missing ({codex / 'url-skill'})", result.stdout)
+        self.assertNotIn("ADHOC bridge", result.stdout)
+        self.assertNotIn(".cache/aiskillsync", result.stdout)
+
+    def test_sync_unconfigured_repo_url_uses_deterministic_cache_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cache = base / "cache"
+            codex = base / "codex"
+            codex.mkdir()
+            repo_url = "https://example.invalid/new-skills.git"
+            config = base / "config.yaml"
+            config.write_text(
+                f"""ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "codex",
+                "--repo",
+                repo_url,
+                env={"XDG_CACHE_HOME": str(cache)},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ADHOC bridge new-skills-", result.stdout)
+        self.assertIn(str(cache / "aiskillsync" / "repos" / "new-skills-"), result.stdout)
+        self.assertIn("PLAN bridge new-skills-", result.stdout)
+        self.assertIn("No destination actions", result.stdout)
+
+    def test_sync_all_legacy_syntax_uses_config_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            ghost = base / "ghost"
+            codex.mkdir()
+            ghost.mkdir()
+            self.write_skill(bridge / "skills", "legacy-skill")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex, "ghost": ghost},
+                default_destinations=("codex",),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Bridges: local", result.stdout)
+        self.assertIn("Destinations: codex", result.stdout)
+        self.assertIn("LINK codex:legacy-skill", result.stdout)
+        self.assertNotIn("ghost:legacy-skill", result.stdout)
+
     def test_sync_dry_run_does_not_mutate_and_dest_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
