@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import Config
+from .config import BridgeConfig, Config
 from .discovery import (
     BridgeDiscovery,
     DestinationStatus,
@@ -56,12 +57,72 @@ class SyncPlan:
         return tuple(action for action in self.actions if action.action == "skip")
 
 
+@dataclass(frozen=True)
+class RepositoryMaterialization:
+    notices: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    @property
+    def has_errors(self) -> bool:
+        return bool(self.errors)
+
+
+def materialize_repositories_for_sync(
+    config: Config,
+    selectors: tuple[str, ...],
+    *,
+    dry_run: bool,
+) -> RepositoryMaterialization:
+    """Clone or update selected enabled bridge repos for sync only."""
+
+    selected, selection_errors = select_bridge_configs(config.bridges, selectors)
+    if selection_errors:
+        return RepositoryMaterialization()
+
+    notices: list[str] = []
+    errors: list[str] = []
+    for bridge in selected:
+        if not bridge.enabled:
+            continue
+
+        root_exists = bridge.path.exists()
+        if not root_exists:
+            if bridge.repo and config.sync.clone_if_missing:
+                notices.append(_clone_notice(bridge, dry_run=dry_run))
+                if not dry_run:
+                    error = _clone_bridge(bridge)
+                    if error is not None:
+                        errors.append(error)
+                continue
+            continue
+
+        if not bridge.path.is_dir():
+            continue
+
+        if config.sync.pull_before_sync:
+            notices.append(_pull_notice(bridge, dry_run=dry_run))
+            if dry_run:
+                continue
+            if not _is_git_repo_root(bridge.path):
+                errors.append(
+                    f"bridge {bridge.name}: pull_before_sync requires a git repo: {bridge.path}"
+                )
+                continue
+            error = _pull_bridge(bridge)
+            if error is not None:
+                errors.append(error)
+
+    return RepositoryMaterialization(notices=tuple(notices), errors=tuple(errors))
+
+
 def build_sync_plan(
     config: Config,
     selectors: tuple[str, ...],
     destination_names: tuple[str, ...],
     *,
     dry_run: bool,
+    preflight_notices: tuple[str, ...] = (),
+    preflight_errors: tuple[str, ...] = (),
 ) -> SyncPlan:
     """Build a sync plan without mutating local repos or destination paths."""
 
@@ -69,7 +130,8 @@ def build_sync_plan(
     selected, selection_errors = select_bridges(discoveries, selectors)
     destinations, destination_errors = select_destinations(config, destination_names)
     errors = [*selection_errors, *destination_errors]
-    notices: list[str] = []
+    errors.extend(preflight_errors)
+    notices: list[str] = [*preflight_notices]
     selected_skills: list[Skill] = []
 
     for discovery in selected:
@@ -79,14 +141,10 @@ def build_sync_plan(
             continue
         if not discovery.root_exists:
             if bridge.repo and config.sync.clone_if_missing:
-                notices.append(
-                    f"PLAN bridge {bridge.name}: clone-if-missing is configured "
-                    f"but not run in Phase 3 ({bridge.repo} -> {bridge.path})"
-                )
-                errors.append(
-                    f"bridge {bridge.name}: local path missing; planned clone is not "
-                    f"executed in Phase 3: {bridge.path}"
-                )
+                if not dry_run:
+                    errors.append(
+                        f"bridge {bridge.name}: local path missing after clone step: {bridge.path}"
+                    )
             else:
                 errors.append(
                     f"bridge {bridge.name}: local path missing and clone is unavailable: {bridge.path}"
@@ -106,11 +164,6 @@ def build_sync_plan(
                 f"{len(discovery.missing_skill_md)}"
             )
             continue
-        if config.sync.pull_before_sync:
-            notices.append(
-                f"PLAN bridge {bridge.name}: pull-before-sync is configured "
-                "but not run in Phase 3"
-            )
         selected_skills.extend(discovery.skills)
 
     duplicate_skills = duplicate_skill_names(tuple(selected_skills))
@@ -177,6 +230,39 @@ def select_bridges(
             candidate = discoveries[index - 1]
         else:
             matches = [item for item in discoveries if item.bridge.name == selector]
+            if not matches:
+                errors.append(f"unknown bridge selector: {selector}")
+                continue
+            if len(matches) > 1:
+                errors.append(f"ambiguous bridge name: {selector}")
+                continue
+            candidate = matches[0]
+        if candidate not in selected:
+            selected.append(candidate)
+    return tuple(selected), tuple(errors)
+
+
+def select_bridge_configs(
+    bridges: tuple[BridgeConfig, ...], selectors: tuple[str, ...]
+) -> tuple[tuple[BridgeConfig, ...], tuple[str, ...]]:
+    if not selectors:
+        return (), ("sync requires at least one bridge selector",)
+    if "all" in selectors:
+        if len(selectors) > 1:
+            return (), ("selector 'all' cannot be combined with bridge names or indexes",)
+        return bridges, ()
+
+    selected: list[BridgeConfig] = []
+    errors: list[str] = []
+    for selector in selectors:
+        if selector.isdigit():
+            index = int(selector)
+            if index < 1 or index > len(bridges):
+                errors.append(f"bridge index out of range: {selector}")
+                continue
+            candidate = bridges[index - 1]
+        else:
+            matches = [item for item in bridges if item.name == selector]
             if not matches:
                 errors.append(f"unknown bridge selector: {selector}")
                 continue
@@ -275,3 +361,81 @@ def _canonical_path(path: Path) -> Path:
         return path.resolve(strict=False)
     except OSError:
         return path.absolute()
+
+
+def _clone_bridge(bridge: BridgeConfig) -> str | None:
+    command = ["git", "clone"]
+    if bridge.branch:
+        command.extend(["--branch", bridge.branch])
+    command.extend([bridge.repo or "", str(bridge.path)])
+    try:
+        bridge.path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        return f"bridge {bridge.name}: git clone failed to start: {exc}"
+    if result.returncode != 0:
+        return (
+            f"bridge {bridge.name}: git clone failed with exit {result.returncode}: "
+            f"{_command_output(result)}"
+        )
+    return None
+
+
+def _pull_bridge(bridge: BridgeConfig) -> str | None:
+    command = ["git", "-C", str(bridge.path), "pull", "--ff-only"]
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        return f"bridge {bridge.name}: git pull --ff-only failed to start: {exc}"
+    if result.returncode != 0:
+        return (
+            f"bridge {bridge.name}: git pull --ff-only failed with exit "
+            f"{result.returncode}: {_command_output(result)}"
+        )
+    return None
+
+
+def _is_git_repo_root(path: Path) -> bool:
+    if not (path / ".git").exists():
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _clone_notice(bridge: BridgeConfig, *, dry_run: bool) -> str:
+    verb = "PLAN" if dry_run else "CLONE"
+    branch = f" --branch {bridge.branch}" if bridge.branch else ""
+    return f"{verb} bridge {bridge.name}: git clone{branch} {bridge.repo} {bridge.path}"
+
+
+def _pull_notice(bridge: BridgeConfig, *, dry_run: bool) -> str:
+    verb = "PLAN" if dry_run else "PULL"
+    return f"{verb} bridge {bridge.name}: git -C {bridge.path} pull --ff-only"
+
+
+def _command_output(result: subprocess.CompletedProcess[str]) -> str:
+    text = (result.stderr or result.stdout or "").strip()
+    if not text:
+        return "no output"
+    return text.splitlines()[0]

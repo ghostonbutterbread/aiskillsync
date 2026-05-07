@@ -48,13 +48,17 @@ The current implementation covers Phase 1, Phase 2, and Phase 3 from
 - destination classification
 - `list` and `doctor` reporting
 - safe dry-run sync planning
+- sync-only bridge clone/pull materialization
 - optional `sync --apply` creation of missing symlinks only
 
 `sync` is dry-run by default. `--apply` is intentionally narrow in Phase 3: it
-only creates destination symlinks that are missing. Existing correct symlinks
-are skipped, and existing directories, files, or symlinks to unexpected targets
-are conflicts that block the whole apply. It does not delete, adopt, back up, or
-replace existing entries; those behaviors are reserved for Phase 4.
+may first clone missing selected enabled bridge roots when `bridge.repo` exists
+and `sync.clone_if_missing` is true, or pull existing selected enabled git
+bridge roots when `sync.pull_before_sync` is true. It then creates destination
+symlinks that are missing. Existing correct symlinks are skipped, and existing
+directories, files, or symlinks to unexpected targets are conflicts that block
+the whole apply. It does not delete, adopt, back up, or replace existing
+entries; those behaviors are reserved for Phase 4.
 
 Reserved future commands are tracked in the spec but intentionally not exposed
 yet: `add` and `remove`.
@@ -130,9 +134,14 @@ Destinations come from repeated `--dest` flags or, when omitted,
 it is explicitly selected with `--dest ghost` or included in
 `sync.default_destinations`.
 
-Only `sync.mode: symlink` is supported. `pull_before_sync` and
-`clone_if_missing` are reported as planned work only in Phase 3; `sync` does not
-run network or git mutations.
+Only `sync.mode: symlink` is supported. Dry-run never runs git and never
+mutates bridge or destination paths; it reports planned `PLAN` clone and pull
+steps. `--apply` may run `git clone`, including `--branch <branch>` when a
+bridge branch is configured, for missing selected enabled bridge roots with a
+repo URL and `sync.clone_if_missing: true`. For existing selected enabled bridge
+roots with `sync.pull_before_sync: true`, `--apply` requires the path to be a
+git repo and runs `git -C <path> pull --ff-only`; any non-zero pull blocks the
+sync before symlink creation. Disabled bridges are never cloned or pulled.
 
 ## Verification
 

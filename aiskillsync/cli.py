@@ -27,7 +27,13 @@ from .discovery import (
     discover_bridges,
     enabled_skills,
 )
-from .sync import SyncAction, SyncPlan, apply_sync_plan, build_sync_plan
+from .sync import (
+    SyncAction,
+    SyncPlan,
+    apply_sync_plan,
+    build_sync_plan,
+    materialize_repositories_for_sync,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -239,11 +245,18 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         return 2
 
     dry_run = not args.apply
+    materialization = materialize_repositories_for_sync(
+        config,
+        tuple(args.selectors),
+        dry_run=dry_run,
+    )
     plan = build_sync_plan(
         config,
         tuple(args.selectors),
         tuple(args.dest),
         dry_run=dry_run,
+        preflight_notices=materialization.notices,
+        preflight_errors=materialization.errors,
     )
     _print_sync_plan(plan, stdout)
 

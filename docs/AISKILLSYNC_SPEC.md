@@ -199,10 +199,16 @@ aiskillsync sync all --adopt
 Default behavior:
 
 - dry-run unless `--apply` is passed.
-- Pull-before-sync is reported when `sync.pull_before_sync` is true, but Phase
-  3 does not run git/network mutation.
-- Clone-if-missing is reported when `sync.clone_if_missing` is true, but Phase
-  3 does not run git/network mutation.
+- Dry-run reports planned clone and pull work but does not run git or mutate the
+  filesystem.
+- Apply clones a missing selected enabled bridge root when `bridge.repo` exists
+  and `sync.clone_if_missing` is true. If `branch` is configured, clone uses
+  `git clone --branch <branch> <repo> <path>`; otherwise it uses
+  `git clone <repo> <path>`.
+- Apply updates an existing selected enabled bridge root when
+  `sync.pull_before_sync` is true, but only if the path is a git repo. The
+  update command is `git -C <path> pull --ff-only`; a non-zero exit blocks sync.
+- Disabled bridges are not cloned or pulled.
 - Link source skill dirs into destination skill dirs.
 
 Safety rules:
@@ -309,7 +315,8 @@ Implemented Phase 3 scope:
 - `--apply` creates only missing destination symlinks and skips already-correct
   symlinks.
 - Destination conflicts block apply before any symlink is created.
-- Pull-before-sync and clone-if-missing are report-only in Phase 3.
+- Clone-if-missing and pull-before-sync run only for `sync --apply`; dry-run is
+  report-only, and `list`, `doctor`, and `config` do not run git.
 
 ### Phase 4 — Adoption / migration mode
 

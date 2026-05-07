@@ -36,6 +36,53 @@ class CliSmokeTests(unittest.TestCase):
         (skill_dir / "SKILL.md").write_text(body, encoding="utf-8")
         return skill_dir
 
+    def write_fake_git(self, root: Path) -> Path:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        git = bin_dir / "git"
+        git.write_text(
+            """#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+log = os.environ.get("AISKILLSYNC_FAKE_GIT_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(" ".join(args) + "\\n")
+
+if args and args[0] == "clone":
+    exit_code = int(os.environ.get("AISKILLSYNC_FAKE_GIT_CLONE_EXIT", "0"))
+    if exit_code:
+        print("fake clone failed", file=sys.stderr)
+        sys.exit(exit_code)
+    target = pathlib.Path(args[-1])
+    skill = os.environ.get("AISKILLSYNC_FAKE_GIT_CLONE_SKILL", "cloned-skill")
+    (target / ".git").mkdir(parents=True)
+    skill_dir = target / "skills" / skill
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("cloned", encoding="utf-8")
+    sys.exit(0)
+
+if len(args) == 4 and args[0] == "-C" and args[2:] == ["pull", "--ff-only"]:
+    exit_code = int(os.environ.get("AISKILLSYNC_FAKE_GIT_PULL_EXIT", "0"))
+    if exit_code:
+        print("fake pull failed", file=sys.stderr)
+    sys.exit(exit_code)
+
+if len(args) == 4 and args[0] == "-C" and args[2:] == ["rev-parse", "--is-inside-work-tree"]:
+    print("true")
+    sys.exit(0)
+
+print("unsupported fake git invocation: " + " ".join(args), file=sys.stderr)
+sys.exit(9)
+""",
+            encoding="utf-8",
+        )
+        git.chmod(0o755)
+        return bin_dir
+
     def write_config(self, path: Path, bridge: Path, codex: Path, claude: Path) -> None:
         path.write_text(
             f"""bridges:
@@ -377,6 +424,111 @@ sync:
         self.assertFalse(claude_exists)
         self.assertFalse(ghost_exists)
 
+    def test_sync_dry_run_plans_clone_without_running_git(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            missing_bridge = base / "missing-bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: cloneable
+    repo: file:///tmp/fake-remote.git
+    path: {missing_bridge}
+    skills_path: skills
+    branch: main
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_LOG": str(log),
+                },
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            f"PLAN bridge cloneable: git clone --branch main file:///tmp/fake-remote.git {missing_bridge}",
+            result.stdout,
+        )
+        self.assertIn("No destination actions", result.stdout)
+        self.assertFalse(missing_bridge.exists())
+        self.assertFalse(log.exists())
+
+    def test_sync_apply_clones_missing_bridge_before_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            bridge = base / "cloned-bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: cloneable
+    repo: file:///tmp/fake-remote.git
+    path: {bridge}
+    skills_path: skills
+    branch: main
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                "--apply",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_LOG": str(log),
+                    "AISKILLSYNC_FAKE_GIT_CLONE_SKILL": "from-clone",
+                },
+            )
+            link = codex / "from-clone"
+            target = link.resolve() if link.is_symlink() else None
+            log_text = log.read_text(encoding="utf-8") if log.exists() else ""
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CLONE bridge cloneable: git clone --branch main", result.stdout)
+        self.assertIn("LINK codex:from-clone", result.stdout)
+        self.assertIn("Created symlinks:", result.stdout)
+        self.assertIn(f"clone --branch main file:///tmp/fake-remote.git {bridge}", log_text)
+        self.assertEqual(target, (bridge / "skills" / "from-clone").resolve())
+
     def test_sync_apply_creates_only_missing_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -459,9 +611,11 @@ sync:
         self.assertIn("Apply blocked", result.stdout)
         self.assertFalse(created)
 
-    def test_sync_missing_cloneable_bridge_blocks_apply_without_mutation(self) -> None:
+    def test_sync_clone_failure_blocks_apply_without_symlink_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
             existing_bridge = base / "existing-bridge"
             missing_bridge = base / "missing-bridge"
             codex = base / "codex"
@@ -493,13 +647,126 @@ sync:
                 encoding="utf-8",
             )
 
-            result = self.run_cli("--config", str(config), "sync", "all", "--apply")
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                "--apply",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_LOG": str(log),
+                    "AISKILLSYNC_FAKE_GIT_CLONE_EXIT": "4",
+                },
+            )
             created = (codex / "present-skill").exists()
+            log_text = log.read_text(encoding="utf-8") if log.exists() else ""
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("PLAN bridge cloneable: clone-if-missing is configured", result.stdout)
-        self.assertIn("ERROR bridge cloneable: local path missing", result.stdout)
+        self.assertIn("CLONE bridge cloneable: git clone", result.stdout)
+        self.assertIn("ERROR bridge cloneable: git clone failed with exit 4", result.stdout)
         self.assertIn("Apply blocked", result.stdout)
+        self.assertIn(f"clone https://example.invalid/cloneable.git {missing_bridge}", log_text)
+        self.assertFalse(created)
+
+    def test_sync_pull_failure_blocks_symlink_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "needs-pull")
+            (bridge / ".git").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: local
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                "--apply",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_LOG": str(log),
+                    "AISKILLSYNC_FAKE_GIT_PULL_EXIT": "7",
+                },
+            )
+            created = (codex / "needs-pull").exists()
+            log_text = log.read_text(encoding="utf-8") if log.exists() else ""
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"PULL bridge local: git -C {bridge} pull --ff-only", result.stdout)
+        self.assertIn("ERROR bridge local: git pull --ff-only failed with exit 7", result.stdout)
+        self.assertIn(f"-C {bridge} pull --ff-only", log_text)
+        self.assertFalse(created)
+
+    def test_sync_pull_before_sync_blocks_existing_non_git_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "non-git")
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: local
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                "--apply",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_LOG": str(log),
+                },
+            )
+            created = (codex / "non-git").exists()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("ERROR bridge local: pull_before_sync requires a git repo", result.stdout)
+        self.assertFalse(log.exists())
         self.assertFalse(created)
 
     def test_sync_destination_root_ancestor_conflict_blocks_apply(self) -> None:
