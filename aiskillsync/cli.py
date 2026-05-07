@@ -26,6 +26,7 @@ from .discovery import (
     discover_bridges,
     enabled_skills,
 )
+from .sync import SyncAction, SyncPlan, apply_sync_plan, build_sync_plan
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +62,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = subparsers.add_parser("doctor", help="validate config and filesystem state")
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    sync_parser = subparsers.add_parser("sync", help="plan or apply skill symlinks")
+    sync_parser.add_argument(
+        "selectors",
+        nargs="+",
+        help="bridge names, 1-based bridge indexes from list output, or all",
+    )
+    sync_parser.add_argument(
+        "--dest",
+        action="append",
+        default=[],
+        help="destination name to sync; repeat for multiple destinations",
+    )
+    mode_group = sync_parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview changes without mutating destination paths (default)",
+    )
+    mode_group.add_argument(
+        "--apply",
+        action="store_true",
+        help="create only missing destination symlinks",
+    )
+    sync_parser.set_defaults(func=cmd_sync)
     return parser
 
 
@@ -202,6 +228,45 @@ def cmd_doctor(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     return 1 if report.has_errors else 0
 
 
+def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    config = _load_config(args)
+    if config.sync.mode != "symlink":
+        print(
+            f"aiskillsync: unsupported sync.mode {config.sync.mode!r}; only 'symlink' is supported",
+            file=stderr,
+        )
+        return 2
+
+    dry_run = not args.apply
+    plan = build_sync_plan(
+        config,
+        tuple(args.selectors),
+        tuple(args.dest),
+        dry_run=dry_run,
+    )
+    _print_sync_plan(plan, stdout)
+
+    if plan.has_blockers:
+        print("Apply blocked by errors or conflicts", file=stdout)
+        return 1
+    if dry_run:
+        print("Dry run only; pass --apply to create missing symlinks", file=stdout)
+        return 0
+
+    try:
+        created = apply_sync_plan(plan)
+    except (OSError, ValueError) as exc:
+        print(f"aiskillsync: apply failed: {exc}", file=stderr)
+        return 1
+    if created:
+        print("Created symlinks:", file=stdout)
+        for item in created:
+            print(f"  {item}", file=stdout)
+    else:
+        print("No symlinks needed", file=stdout)
+    return 0
+
+
 def _load_config(args: argparse.Namespace) -> Config:
     return load_config(args.config)
 
@@ -320,3 +385,45 @@ def _print_destination_classification(
         for skill in skills:
             status = classify_destination(dest_path, skill)
             print(f"  {skill.name}: {status.label} ({status.detail})", file=stdout)
+
+
+def _print_sync_plan(plan: SyncPlan, stdout: TextIO) -> None:
+    mode = "dry-run" if plan.dry_run else "apply"
+    print(f"Sync plan ({mode})", file=stdout)
+    if plan.selected_discoveries:
+        bridges = ", ".join(item.bridge.name for item in plan.selected_discoveries)
+    else:
+        bridges = "-"
+    print(f"Bridges: {bridges}", file=stdout)
+    print(
+        "Destinations: " + (", ".join(plan.destinations) if plan.destinations else "-"),
+        file=stdout,
+    )
+    for notice in plan.notices:
+        print(notice, file=stdout)
+    for error in plan.errors:
+        print(f"ERROR {error}", file=stdout)
+    for name, skills in plan.duplicate_skills.items():
+        locations = ", ".join(str(skill.path) for skill in skills)
+        print(f"ERROR duplicate selected skill name {name}: {locations}", file=stdout)
+
+    if not plan.actions:
+        print("No destination actions", file=stdout)
+        return
+
+    print("Destination actions:", file=stdout)
+    for action in plan.actions:
+        print(f"  {_format_sync_action(action)}", file=stdout)
+
+
+def _format_sync_action(action: SyncAction) -> str:
+    if action.action == "link":
+        verb = "LINK"
+    elif action.action == "skip":
+        verb = "SKIP"
+    else:
+        verb = "CONFLICT"
+    return (
+        f"{verb} {action.destination}:{action.skill.name} "
+        f"{action.status.label} ({action.status.detail})"
+    )

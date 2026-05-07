@@ -96,7 +96,7 @@ sync:
 
 ## CLI
 
-Implemented Phase 1/2 command shape:
+Implemented Phase 1/2/3 command shape:
 
 ```bash
 aiskillsync init
@@ -104,14 +104,14 @@ aiskillsync config
 aiskillsync config --default
 aiskillsync list
 aiskillsync doctor
+aiskillsync sync all
+aiskillsync sync bounty-harness --dest codex --dest claude
+aiskillsync sync 1 2 --apply
 ```
 
 Reserved future command shape:
 
 ```bash
-aiskillsync sync all
-aiskillsync sync bounty-harness
-aiskillsync sync 1 2
 aiskillsync add <name> <repo> --path <local-path> --skills-path skills --branch main
 aiskillsync remove <name>
 ```
@@ -166,8 +166,6 @@ Checks:
 
 ### `sync`
 
-Future placeholder. Not implemented in Phase 1/2.
-
 Synchronizes selected bridges into selected destinations.
 
 Examples:
@@ -178,15 +176,21 @@ aiskillsync sync bounty-harness
 aiskillsync sync 1 2
 aiskillsync sync bounty-harness --dest codex --dest claude
 aiskillsync sync all --dry-run
+```
+
+Future Phase 4 adoption command shape:
+
+```bash
 aiskillsync sync all --adopt
 ```
 
 Default behavior:
 
-- dry-run unless `--apply`? Decision needed.
-- Recommended for safety: dry-run by default for early versions, later switch to apply after confidence.
-- Pull before sync if `sync.pull_before_sync` is true.
-- Clone if missing when `sync.clone_if_missing` is true.
+- dry-run unless `--apply` is passed.
+- Pull-before-sync is reported when `sync.pull_before_sync` is true, but Phase
+  3 does not run git/network mutation.
+- Clone-if-missing is reported when `sync.clone_if_missing` is true, but Phase
+  3 does not run git/network mutation.
 - Link source skill dirs into destination skill dirs.
 
 Safety rules:
@@ -197,6 +201,16 @@ Safety rules:
 - If destination is a symlink to another source, report conflict unless adoption is explicit.
 - If destination is a copied dir with matching source `SKILL.md`, it may be replaced with symlink during adoption.
 - If destination differs, back it up before replacement when adoption mode is enabled.
+
+Phase 3 `--apply` supports only the first two safety cases:
+
+- `already-linked`: skip.
+- `missing`: create the destination symlink.
+- `directory-copy`, `unexpected-symlink`, and `path-conflict`: report a
+  conflict and block the whole apply.
+
+Phase 3 does not delete, adopt, back up, replace, or otherwise modify existing
+destination entries.
 
 ## Migration helper
 
@@ -272,6 +286,18 @@ Acceptance:
 - Can sync Bounty Harness skills into Codex and Claude with symlinks.
 - Does not touch Ghost unless `--dest ghost` is passed or configured as default.
 - Does not touch unrelated destination skills.
+
+Implemented Phase 3 scope:
+
+- `sync` selects bridges by name, `all`, or 1-based list indexes.
+- `--dest` is repeatable; omitted destinations come from
+  `sync.default_destinations`.
+- `sync.mode` must be `symlink`.
+- Dry-run is the default behavior.
+- `--apply` creates only missing destination symlinks and skips already-correct
+  symlinks.
+- Destination conflicts block apply before any symlink is created.
+- Pull-before-sync and clone-if-missing are report-only in Phase 3.
 
 ### Phase 4 — Adoption / migration mode
 
