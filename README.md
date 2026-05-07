@@ -17,6 +17,9 @@ python3 -m aiskillsync config --default
 python3 -m aiskillsync config
 python3 -m aiskillsync list
 python3 -m aiskillsync doctor
+python3 -m aiskillsync sync main
+python3 -m aiskillsync sync codex --repo bounty-harness
+python3 -m aiskillsync sync openclaw --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
 python3 -m aiskillsync sync all
 python3 -m aiskillsync sync bounty-harness --dest codex --dest claude
 python3 -m aiskillsync sync 1 2 --apply
@@ -120,19 +123,47 @@ names, still affects the exit status.
 
 ## Sync Command
 
-`sync` selects bridges by name, by `all`, or by the 1-based indexes shown in
-`list` output:
+`sync` now prefers destination-first arguments. Destination groups are:
+
+- `main`: Codex and Claude
+- `codex`: Codex only
+- `claude`: Claude only
+- `ghost` or `openclaw`: Ghost/OpenClaw only
+- `all`: every configured destination when used with `--repo`
+
+Repo selection is optional and defaults to all configured bridges. Use
+repeatable `--repo` flags to select configured bridge names or repo URLs:
+
+```bash
+python3 -m aiskillsync sync main
+python3 -m aiskillsync sync codex
+python3 -m aiskillsync sync openclaw --repo bounty-harness
+python3 -m aiskillsync sync main --repo bounty-harness --repo bounty-tools
+python3 -m aiskillsync sync codex --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
+```
+
+If a `--repo` URL matches an existing configured bridge URL, aiskillsync uses
+that bridge's configured local path and does not create a duplicate clone. An
+unconfigured repo URL is treated as an ad-hoc bridge for this run only. Its
+deterministic clone path is
+`${XDG_CACHE_HOME:-~/.cache}/aiskillsync/repos/<repo-slug>-<url-hash>`. If that
+path already exists, normal sync safety checks apply; aiskillsync does not
+delete or replace it.
+
+The old bridge-first syntax remains supported. `sync all` still means all
+bridges into `sync.default_destinations`, and repeated `--dest` flags still
+select legacy destinations:
 
 ```bash
 python3 -m aiskillsync sync all
 python3 -m aiskillsync sync bounty-harness
 python3 -m aiskillsync sync 1 2
+python3 -m aiskillsync sync bounty-harness --dest codex --dest claude
 ```
 
-Destinations come from repeated `--dest` flags or, when omitted,
-`sync.default_destinations` in the config. Ghost/OpenClaw is not touched unless
-it is explicitly selected with `--dest ghost` or included in
-`sync.default_destinations`.
+Ghost/OpenClaw is not touched unless it is explicitly selected with
+`sync ghost`, `sync openclaw`, `--dest ghost`, `--dest openclaw`, `sync all
+--repo ...`, or included in `sync.default_destinations`.
 
 Only `sync.mode: symlink` is supported. Dry-run never runs git and never
 mutates bridge or destination paths; it reports planned `PLAN` clone and pull
