@@ -14,6 +14,7 @@ from .config import (
     DEFAULT_CONFIG_TEXT,
     config_from_mapping,
     default_config_path,
+    ensure_default_config,
     expand_path,
     load_config,
     parse_simple_yaml,
@@ -204,7 +205,7 @@ def cmd_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
-    config_path = expand_path(args.config) if args.config else default_config_path()
+    config_path = expand_path(args.config) if args.config else ensure_default_config()
     if not config_path.exists():
         print(f"FAIL config exists: {config_path}", file=stdout)
         return 1

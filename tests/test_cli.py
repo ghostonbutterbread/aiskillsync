@@ -1,20 +1,29 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from aiskillsync.config import DEFAULT_CONFIG_TEXT
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class CliSmokeTests(unittest.TestCase):
-    def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_cli(
+        self, *args: str, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        child_env = os.environ.copy()
+        if env:
+            child_env.update(env)
         return subprocess.run(
             [sys.executable, "-m", "aiskillsync", *args],
             cwd=ROOT,
+            env=child_env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -124,12 +133,55 @@ sync:
 
             default_result = self.run_cli("--config", str(missing_config), "config", "--default")
             strict_result = self.run_cli("--config", str(missing_config), "config")
+            strict_list_result = self.run_cli("--config", str(missing_config), "list")
 
         self.assertEqual(default_result.returncode, 0, default_result.stderr)
         self.assertIn("bridges:", default_result.stdout)
         self.assertIn("ai_skill_paths:", default_result.stdout)
         self.assertEqual(strict_result.returncode, 2)
         self.assertIn("config does not exist", strict_result.stderr)
+        self.assertEqual(strict_list_result.returncode, 2)
+        self.assertIn("config does not exist", strict_list_result.stderr)
+
+    def test_default_config_auto_created_for_first_run_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            config = home / ".config" / "aiskillsync" / "config.yaml"
+
+            result = self.run_cli("config", env={"HOME": str(home)})
+            content = config.read_text(encoding="utf-8") if config.exists() else ""
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Config: {config}", result.stdout)
+        self.assertEqual(content, DEFAULT_CONFIG_TEXT)
+
+    def test_config_default_does_not_create_default_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            config = home / ".config" / "aiskillsync" / "config.yaml"
+
+            result = self.run_cli("config", "--default", env={"HOME": str(home)})
+            exists = config.exists()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("bridges:", result.stdout)
+        self.assertFalse(exists)
+
+    def test_doctor_auto_creates_default_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            config = home / ".config" / "aiskillsync" / "config.yaml"
+
+            result = self.run_cli("doctor", env={"HOME": str(home)})
+            exists = config.exists()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"OK config exists: {config}", result.stdout)
+        self.assertIn("OK config parses", result.stdout)
+        self.assertTrue(exists)
 
     def test_config_list_and_doctor_classify_destinations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
