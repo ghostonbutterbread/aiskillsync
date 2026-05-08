@@ -39,6 +39,8 @@ A bridge is a configured source repo that contains one or more skills.
 Example:
 
 ```yaml
+repo_dir: ~/.config/aiskillsync/repos
+
 bridges:
   - name: bounty-harness
     repo: https://github.com/ghostonbutterbread/bug-bounty-harness.git
@@ -110,13 +112,9 @@ aiskillsync sync openclaw --repo https://github.com/ghostonbutterbread/bug-bount
 aiskillsync sync all
 aiskillsync sync bounty-harness --dest codex --dest claude
 aiskillsync sync 1 2 --apply
-```
-
-Reserved future command shape:
-
-```bash
-aiskillsync add <name> <repo> --path <local-path> --skills-path skills --branch main
-aiskillsync remove <name>
+aiskillsync add https://github.com/org/ai-skills.git
+aiskillsync add https://github.com/org/ai-skills.git ~/projects/ai-skills
+aiskillsync remove ai-skills
 ```
 
 ### `init`
@@ -143,11 +141,11 @@ not create or load a config file.
 
 ### `list`
 
-Shows configured bridges and discovered skills.
+Shows configured repos and discovered skills.
 
 Must show:
 
-- bridge number
+- repo number
 - name
 - enabled/disabled
 - local path
@@ -163,14 +161,14 @@ Validates config and filesystem state.
 Checks:
 
 - config exists and parses
-- bridge names are unique
+- repo names are unique
 - destination names are unique
-- enabled bridge local paths exist or are cloneable
-- enabled bridge `skills_path` exists when the bridge local path already exists
-- enabled bridges have `skills_path`
+- enabled repo local paths exist or are cloneable
+- enabled repo `skills_path` exists when the repo local path already exists
+- enabled repos have `skills_path`
 - each skill dir has `SKILL.md`
-- duplicate skill names across enabled bridges are reported as conflicts
-- disabled bridge-local checks are labeled `SKIP` unless a global check affects
+- duplicate skill names across enabled repos are reported as conflicts
+- disabled repo-local checks are labeled `SKIP` unless a global check affects
   the command exit status
 - destination entries are classified:
   - already linked to correct source
@@ -181,7 +179,7 @@ Checks:
 
 ### `sync`
 
-Synchronizes selected bridges into selected destinations.
+Synchronizes selected repos into selected destinations.
 
 Examples:
 
@@ -214,28 +212,28 @@ Default behavior:
   - `claude` selects only the Claude destination.
   - `ghost` and `openclaw` are aliases for the Ghost/OpenClaw destination.
   - `all` selects all configured destinations when paired with `--repo`.
-- Repo selection defaults to all configured bridges.
-- `--repo` is repeatable and selects configured bridges by name or repo URL.
-- If a `--repo` URL matches a configured bridge URL, the configured bridge path,
+- Repo selection defaults to all configured repos.
+- `--repo` is repeatable and selects configured repos by name or repo URL.
+- If a `--repo` URL matches a configured repo URL, the configured repo path,
   skills path, and branch are used; no duplicate ad-hoc clone is created.
 - If a `--repo` URL is not configured, aiskillsync creates an ad-hoc in-memory
-  bridge for that run only. The clone path is deterministic:
-  `${XDG_CACHE_HOME:-~/.cache}/aiskillsync/repos/<repo-slug>-<url-hash>`.
-  Existing paths are never deleted or replaced; normal bridge path validation
+  repo for that run only. The clone path is deterministic:
+  `repo_dir/<repo-slug>-<url-hash>` (default: `~/.config/aiskillsync/repos/<repo-slug>-<url-hash>`).
+  Existing paths are never deleted or replaced; normal repo path validation
   and git safety checks apply.
-- Legacy bridge-first syntax remains supported. `sync all` with no `--repo`
-  still means all bridges into `sync.default_destinations`, and `--dest` remains
+- Legacy repo-first syntax remains supported. `sync all` with no `--repo`
+  still means all repos into `sync.default_destinations`, and `--dest` remains
   a repeatable legacy destination filter.
 - Dry-run reports planned clone and pull work but does not run git or mutate the
   filesystem.
-- Apply clones a missing selected enabled bridge root when `bridge.repo` exists
+- Apply clones a missing selected enabled repo root when `repo` exists
   and `sync.clone_if_missing` is true. If `branch` is configured, clone uses
   `git clone --branch <branch> <repo> <path>`; otherwise it uses
   `git clone <repo> <path>`.
-- Apply updates an existing selected enabled bridge root when
+- Apply updates an existing selected enabled repo root when
   `sync.pull_before_sync` is true, but only if the path is a git repo. The
   update command is `git -C <path> pull --ff-only`; a non-zero exit blocks sync.
-- Disabled bridges are not cloned or pulled.
+- Disabled repos are not cloned or pulled.
 - Link source skill dirs into destination skill dirs.
 
 Safety rules:
@@ -339,7 +337,7 @@ Implemented Phase 3 scope:
   `sync.default_destinations`.
 - Destination-first groups `main`, `codex`, `claude`, `ghost`/`openclaw`, and
   `all` are implemented.
-- `--repo` is repeatable and accepts configured bridge names, configured repo
+- `--repo` is repeatable and accepts configured repo names, configured repo
   URLs, or unconfigured ad-hoc repo URLs.
 - `sync.mode` must be `symlink`.
 - Dry-run is the default behavior.
@@ -381,21 +379,25 @@ cd ~/projects/bug_bounty_harness
 
 still works and delegates to `aiskillsync`.
 
-### Phase 6 — Bridge config management
+### Phase 6 — Repo config management
 
-Future placeholder for `add` and `remove`.
+Implemented repo-first `add` and `remove` commands.
 
 Deliverables:
 
-- `aiskillsync add <name> <repo> --path <local-path> --skills-path skills --branch main`
-- `aiskillsync remove <name>`
-- no-overwrite config edits with clear diffs or dry-run output
+- `aiskillsync add <repo-url-or-path> [local-path] --skills-path skills --branch main`
+- `aiskillsync repo add <repo-url-or-path> [local-path]`
+- `aiskillsync remove <repo-name-or-url>`
+- `aiskillsync repo remove <repo-name-or-url>`
+- targeted config edits that preserve unrelated comments/keys where practical
+- atomic config writes
 
 Acceptance:
 
-- Can add a disabled or enabled bridge entry without corrupting existing config.
-- Can remove a bridge entry by name without touching local repos or destination
+- Can add a disabled or enabled repo entry without corrupting existing config.
+- Can remove a repo entry by name or URL without touching local repos or destination
   skill directories.
+- URL repos without explicit local path use `repo_dir/<repo-name>`; ad-hoc sync URLs use `repo_dir/<repo-slug>-<url-hash>`.
 
 ## Open design decisions
 

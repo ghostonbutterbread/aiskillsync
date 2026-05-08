@@ -217,6 +217,550 @@ sync:
         self.assertIn("bridges:", result.stdout)
         self.assertFalse(exists)
 
+    def test_pyproject_exposes_only_aiskillsync_console_script(self) -> None:
+        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertIn("aiskillsync = \"aiskillsync.cli:main\"", text)
+        self.assertNotIn("migrate_aiskillsync_personal", text)
+
+    def test_repo_add_uses_repo_dir_and_sync_apply_clones_configured_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            repo_dir = base / "repos"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""repo_dir: {repo_dir}
+
+bridges: []
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            add_result = self.run_cli(
+                "--config",
+                str(config),
+                "repo",
+                "add",
+                "https://example.invalid/toolkit.git",
+                "--branch",
+                "main",
+            )
+            content_after_add = config.read_text(encoding="utf-8")
+            sync_result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "codex",
+                "--repo",
+                "toolkit",
+                "--apply",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_CLONE_SKILL": "from-added",
+                },
+            )
+            link = codex / "from-added"
+            target = link.resolve() if link.is_symlink() else None
+
+        self.assertEqual(add_result.returncode, 0, add_result.stdout + add_result.stderr)
+        self.assertIn("Added repo toolkit", add_result.stdout)
+        self.assertIn(f"path: {repo_dir / 'toolkit'}", content_after_add)
+        self.assertIn("branch: main", content_after_add)
+        self.assertEqual(sync_result.returncode, 0, sync_result.stdout + sync_result.stderr)
+        self.assertIn(f"CLONE repo toolkit: git clone --branch main", sync_result.stdout)
+        self.assertEqual(target, (repo_dir / "toolkit" / "skills" / "from-added").resolve())
+
+    def test_repo_add_without_repo_dir_defaults_to_config_aiskillsync_repos_not_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            home.mkdir()
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges: []
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "repo",
+                "add",
+                "https://example.invalid/defaulted.git",
+                env={"HOME": str(home)},
+            )
+            content = config.read_text(encoding="utf-8")
+
+        default_repo_dir = home / ".config" / "aiskillsync" / "repos"
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("repo_dir: ~/.config/aiskillsync/repos", content)
+        self.assertIn("path: ~/.config/aiskillsync/repos/defaulted", content)
+        self.assertNotIn(f"path: {default_repo_dir / 'defaulted'}", content)
+        self.assertNotIn("path: defaulted", content)
+
+    def test_repo_add_preserves_comments_unknown_keys_and_repo_dir_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            home.mkdir()
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""# top comment
+custom_top:
+  keep: true
+
+repo_dir: ~/skill-repos # keep repo dir literal
+
+bridges: [] # managed repos
+
+# destination comment
+ai_skill_paths:
+  codex: {codex}
+
+unknown_after: keep-me
+
+sync:
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "repo",
+                "add",
+                "https://example.invalid/toolkit.git",
+                env={"HOME": str(home)},
+            )
+            content = config.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("# top comment", content)
+        self.assertIn("custom_top:", content)
+        self.assertIn("unknown_after: keep-me", content)
+        self.assertIn("repo_dir: ~/skill-repos # keep repo dir literal", content)
+        self.assertIn("bridges: # managed repos", content)
+        self.assertIn("path: ~/skill-repos/toolkit", content)
+        self.assertNotIn(str(home / "skill-repos" / "toolkit"), content)
+        self.assertLess(content.index("custom_top:"), content.index("repo_dir:"))
+        self.assertLess(content.index("unknown_after:"), content.index("sync:"))
+
+    def test_repo_add_creates_bridges_block_without_rewriting_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""# no bridges yet
+ai_skill_paths:
+  codex: {codex}
+
+custom_tail: preserved
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "repo",
+                "add",
+                "https://example.invalid/new-one.git",
+            )
+            content = config.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("# no bridges yet", content)
+        self.assertIn("repo_dir: ~/.config/aiskillsync/repos", content)
+        self.assertIn("custom_tail: preserved", content)
+        self.assertIn("\nbridges:\n  - name: new-one\n", content)
+        self.assertIn("path: ~/.config/aiskillsync/repos/new-one", content)
+
+    def test_repo_add_url_explicit_positional_location(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo_dir = base / "repos"
+            checkout = base / "custom" / "toolkit"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""repo_dir: {repo_dir}
+
+bridges: []
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "repo",
+                "add",
+                "https://example.invalid/toolkit.git",
+                str(checkout),
+            )
+            content = config.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Added repo toolkit", result.stdout)
+        self.assertIn(f"path: {checkout}", content)
+        self.assertNotIn(f"path: {repo_dir / 'toolkit'}", content)
+
+    def test_top_level_add_alias_still_works(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            checkout = base / "custom" / "alias"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges: []
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "add",
+                "https://example.invalid/alias.git",
+                str(checkout),
+            )
+            content = config.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Added repo alias", result.stdout)
+        self.assertIn(f"path: {checkout}", content)
+
+    def test_repo_add_local_path_uses_path_name_and_does_not_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            local_repo = base / "local-tools"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(local_repo / "skills", "local-skill")
+            config = base / "config.yaml"
+            config.write_text(
+                f"""repo_dir: {base / 'repos'}
+
+bridges: []
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            add_result = self.run_cli(
+                "--config",
+                str(config),
+                "repo",
+                "add",
+                str(local_repo),
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_LOG": str(log),
+                },
+            )
+            content = config.read_text(encoding="utf-8")
+            sync_result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "codex",
+                "--repo",
+                "local-tools",
+                "--apply",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_LOG": str(log),
+                },
+            )
+            link = codex / "local-skill"
+            target = link.resolve() if link.is_symlink() else None
+            git_was_called = log.exists()
+
+        self.assertEqual(add_result.returncode, 0, add_result.stdout + add_result.stderr)
+        self.assertIn("Added repo local-tools (enabled): local path", add_result.stdout)
+        self.assertIn("  - name: local-tools", content)
+        self.assertNotIn("repo: ", content)
+        self.assertIn(f"path: {local_repo}", content)
+        self.assertEqual(sync_result.returncode, 0, sync_result.stdout + sync_result.stderr)
+        self.assertIn("LINK codex:local-skill", sync_result.stdout)
+        self.assertEqual(target, (local_repo / "skills" / "local-skill").resolve())
+        self.assertFalse(git_was_called)
+
+    def test_repo_add_path_alias_still_sets_checkout_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            checkout = base / "legacy-path"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges: []
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "repo",
+                "add",
+                "https://example.invalid/legacy.git",
+                "--path",
+                str(checkout),
+            )
+            content = config.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"path: {checkout}", content)
+
+    def test_repo_remove_updates_config_without_deleting_repo_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo_dir = base / "repos"
+            checkout = repo_dir / "toolkit"
+            checkout.mkdir(parents=True)
+            sentinel = checkout / "sentinel.txt"
+            sentinel.write_text("keep", encoding="utf-8")
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""repo_dir: {repo_dir}
+
+bridges:
+  - name: toolkit
+    repo: https://example.invalid/toolkit.git
+    path: {checkout}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli("--config", str(config), "repo", "remove", "toolkit")
+            content = config.read_text(encoding="utf-8")
+            sentinel_exists = sentinel.exists()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Removed repo toolkit from config", result.stdout)
+        self.assertIn("Left local path untouched", result.stdout)
+        self.assertIn("bridges: []", content)
+        self.assertTrue(sentinel_exists)
+
+    def test_repo_remove_by_url_then_name_updates_config_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            first = base / "first"
+            second = base / "second"
+            first.mkdir()
+            second.mkdir()
+            codex = base / "codex"
+            codex.mkdir()
+            first_url = "https://example.invalid/first.git"
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: first
+    repo: {first_url}
+    path: {first}
+    skills_path: skills
+    enabled: true
+  - name: second
+    repo: https://example.invalid/second.git
+    path: {second}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            by_url = self.run_cli("--config", str(config), "repo", "remove", first_url)
+            content_after_url = config.read_text(encoding="utf-8")
+            first_still_exists = first.exists()
+            by_name = self.run_cli("--config", str(config), "repo", "remove", "second")
+            content_after_name = config.read_text(encoding="utf-8")
+            second_still_exists = second.exists()
+
+        self.assertEqual(by_url.returncode, 0, by_url.stdout + by_url.stderr)
+        self.assertIn("Removed repo first from config", by_url.stdout)
+        self.assertNotIn("name: first", content_after_url)
+        self.assertIn("name: second", content_after_url)
+        self.assertEqual(by_name.returncode, 0, by_name.stdout + by_name.stderr)
+        self.assertIn("Removed repo second from config", by_name.stdout)
+        self.assertIn("bridges: []", content_after_name)
+        self.assertTrue(first_still_exists)
+        self.assertTrue(second_still_exists)
+
+    def test_repo_remove_preserves_comments_unknown_keys_and_other_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            first = base / "first"
+            second = base / "second"
+            first.mkdir()
+            second.mkdir()
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""# preserve header
+custom_top: yes
+
+bridges:
+  - name: first
+    repo: https://example.invalid/first.git
+    path: {first}
+    skills_path: skills
+    enabled: true
+  - name: second
+    repo: https://example.invalid/second.git
+    path: {second}
+    skills_path: skills
+    enabled: true
+
+# keep destination comment
+ai_skill_paths:
+  codex: {codex}
+
+unknown_after: still-here
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli("--config", str(config), "repo", "remove", "first")
+            content = config.read_text(encoding="utf-8")
+            first_still_exists = first.exists()
+            second_still_exists = second.exists()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("# preserve header", content)
+        self.assertIn("custom_top: yes", content)
+        self.assertIn("# keep destination comment", content)
+        self.assertIn("unknown_after: still-here", content)
+        self.assertNotIn("name: first", content)
+        self.assertIn("name: second", content)
+        self.assertNotIn("bridges: []", content)
+        self.assertTrue(first_still_exists)
+        self.assertTrue(second_still_exists)
+
+    def test_repo_remove_ignores_nested_lists_when_selecting_repo_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            first = base / "first"
+            second = base / "second"
+            first.mkdir()
+            second.mkdir()
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: first
+    repo: https://example.invalid/first.git
+    path: {first}
+    skills_path: skills
+    enabled: true
+    labels:
+      - keep-a
+      - keep-b
+  - name: second
+    repo: https://example.invalid/second.git
+    path: {second}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli("--config", str(config), "repo", "remove", "second")
+            content = config.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("name: first", content)
+        self.assertIn("labels:", content)
+        self.assertIn("- keep-a", content)
+        self.assertIn("- keep-b", content)
+        self.assertNotIn("name: second", content)
+
     def test_doctor_auto_creates_default_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -328,7 +872,7 @@ sync:
             result = self.run_cli("--config", str(config), "doctor")
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("FAIL bridge local-bridge: local skills path missing", result.stdout)
+        self.assertIn("FAIL repo local-bridge: local skills path missing", result.stdout)
         self.assertNotIn("repo is cloneable", result.stdout)
 
     def test_doctor_skips_disabled_bridge_skill_dir_failures(self) -> None:
@@ -361,7 +905,7 @@ sync:
 
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn("FAIL", result.stdout)
-        self.assertIn("SKIP bridge disabled-bridge: disabled", result.stdout)
+        self.assertIn("SKIP repo disabled-bridge: disabled", result.stdout)
         self.assertIn("disabled skill dirs missing SKILL.md", result.stdout)
 
     def test_sync_selects_bridge_by_name_and_index(self) -> None:
@@ -384,11 +928,11 @@ sync:
             by_name = self.run_cli("--config", str(config), "sync", "first", "--dest", "codex")
 
         self.assertEqual(by_index.returncode, 0, by_index.stdout + by_index.stderr)
-        self.assertIn("Bridges: second", by_index.stdout)
+        self.assertIn("Repos: second", by_index.stdout)
         self.assertIn("codex:beta", by_index.stdout)
         self.assertNotIn("codex:alpha", by_index.stdout)
         self.assertEqual(by_name.returncode, 0, by_name.stdout + by_name.stderr)
-        self.assertIn("Bridges: first", by_name.stdout)
+        self.assertIn("Repos: first", by_name.stdout)
         self.assertIn("codex:alpha", by_name.stdout)
         self.assertNotIn("codex:beta", by_name.stdout)
 
@@ -488,7 +1032,7 @@ sync:
             )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Bridges: second", result.stdout)
+        self.assertIn("Repos: second", result.stdout)
         self.assertIn("LINK codex:beta", result.stdout)
         self.assertNotIn("codex:alpha", result.stdout)
 
@@ -527,21 +1071,24 @@ sync:
             )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Bridges: configured", result.stdout)
+        self.assertIn("Repos: configured", result.stdout)
         self.assertIn(f"LINK codex:url-skill missing ({codex / 'url-skill'})", result.stdout)
-        self.assertNotIn("ADHOC bridge", result.stdout)
+        self.assertNotIn("ADHOC repo", result.stdout)
         self.assertNotIn(".cache/aiskillsync", result.stdout)
 
-    def test_sync_unconfigured_repo_url_uses_deterministic_cache_path(self) -> None:
+    def test_sync_unconfigured_repo_url_uses_deterministic_repo_dir_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             cache = base / "cache"
+            repo_dir = base / "repos"
             codex = base / "codex"
             codex.mkdir()
             repo_url = "https://example.invalid/new-skills.git"
             config = base / "config.yaml"
             config.write_text(
-                f"""ai_skill_paths:
+                f"""repo_dir: {repo_dir}
+
+ai_skill_paths:
   codex: {codex}
 
 sync:
@@ -565,9 +1112,10 @@ sync:
             )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("ADHOC bridge new-skills-", result.stdout)
-        self.assertIn(str(cache / "aiskillsync" / "repos" / "new-skills-"), result.stdout)
-        self.assertIn("PLAN bridge new-skills-", result.stdout)
+        self.assertIn("ADHOC repo new-skills-", result.stdout)
+        self.assertIn(str(repo_dir / "new-skills-"), result.stdout)
+        self.assertNotIn(str(cache), result.stdout)
+        self.assertIn("PLAN repo new-skills-", result.stdout)
         self.assertIn("No destination actions", result.stdout)
 
     def test_sync_all_legacy_syntax_uses_config_defaults(self) -> None:
@@ -590,7 +1138,7 @@ sync:
             result = self.run_cli("--config", str(config), "sync", "all")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Bridges: local", result.stdout)
+        self.assertIn("Repos: local", result.stdout)
         self.assertIn("Destinations: codex", result.stdout)
         self.assertIn("LINK codex:legacy-skill", result.stdout)
         self.assertNotIn("ghost:legacy-skill", result.stdout)
@@ -672,7 +1220,7 @@ sync:
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(
-            f"PLAN bridge cloneable: git clone --branch main file:///tmp/fake-remote.git {missing_bridge}",
+            f"PLAN repo cloneable: git clone --branch main file:///tmp/fake-remote.git {missing_bridge}",
             result.stdout,
         )
         self.assertIn("No destination actions", result.stdout)
@@ -727,7 +1275,7 @@ sync:
             log_text = log.read_text(encoding="utf-8") if log.exists() else ""
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("CLONE bridge cloneable: git clone --branch main", result.stdout)
+        self.assertIn("CLONE repo cloneable: git clone --branch main", result.stdout)
         self.assertIn("LINK codex:from-clone", result.stdout)
         self.assertIn("Created symlinks:", result.stdout)
         self.assertIn(f"clone --branch main file:///tmp/fake-remote.git {bridge}", log_text)
@@ -867,8 +1415,8 @@ sync:
             log_text = log.read_text(encoding="utf-8") if log.exists() else ""
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("CLONE bridge cloneable: git clone", result.stdout)
-        self.assertIn("ERROR bridge cloneable: git clone failed with exit 4", result.stdout)
+        self.assertIn("CLONE repo cloneable: git clone", result.stdout)
+        self.assertIn("ERROR repo cloneable: git clone failed with exit 4", result.stdout)
         self.assertIn("Apply blocked", result.stdout)
         self.assertIn(f"clone https://example.invalid/cloneable.git {missing_bridge}", log_text)
         self.assertFalse(created)
@@ -920,8 +1468,8 @@ sync:
             log_text = log.read_text(encoding="utf-8") if log.exists() else ""
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(f"PULL bridge local: git -C {bridge} pull --ff-only", result.stdout)
-        self.assertIn("ERROR bridge local: git pull --ff-only failed with exit 7", result.stdout)
+        self.assertIn(f"PULL repo local: git -C {bridge} pull --ff-only", result.stdout)
+        self.assertIn("ERROR repo local: git pull --ff-only failed with exit 7", result.stdout)
         self.assertIn(f"-C {bridge} pull --ff-only", log_text)
         self.assertFalse(created)
 
@@ -969,7 +1517,7 @@ sync:
             created = (codex / "non-git").exists()
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("ERROR bridge local: pull_before_sync requires a git repo", result.stdout)
+        self.assertIn("ERROR repo local: pull_before_sync requires a git repo", result.stdout)
         self.assertFalse(log.exists())
         self.assertFalse(created)
 

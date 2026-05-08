@@ -7,14 +7,18 @@ subset used by the documented config shape instead of depending on PyYAML.
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_CONFIG_PATH = Path("~/.config/aiskillsync/config.yaml")
+DEFAULT_REPO_DIR = Path("~/.config/aiskillsync/repos")
 
-DEFAULT_CONFIG_TEXT = """bridges:
+DEFAULT_CONFIG_TEXT = """repo_dir: ~/.config/aiskillsync/repos
+
+bridges:
   - name: bounty-harness
     repo: https://github.com/ghostonbutterbread/bug-bounty-harness.git
     path: ~/projects/bug_bounty_harness
@@ -69,6 +73,7 @@ class SyncConfig:
 @dataclass(frozen=True)
 class Config:
     path: Path
+    repo_dir: Path = field(default_factory=lambda: expand_path(DEFAULT_REPO_DIR))
     bridges: tuple[BridgeConfig, ...] = field(default_factory=tuple)
     ai_skill_paths: dict[str, Path] = field(default_factory=dict)
     sync: SyncConfig = field(default_factory=SyncConfig)
@@ -84,16 +89,44 @@ def default_config_path() -> Path:
     return expand_path(DEFAULT_CONFIG_PATH)
 
 
+def default_repo_dir() -> Path:
+    return expand_path(DEFAULT_REPO_DIR)
+
+
 def ensure_default_config() -> Path:
     config_path = default_config_path()
     if config_path.exists():
         return config_path
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
+        atomic_write_text(config_path, DEFAULT_CONFIG_TEXT)
     except OSError as exc:
         raise ConfigError(f"could not create default config {config_path}: {exc}") from exc
     return config_path
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with ``text`` using a temp file in-place."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name: str | None = None
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.replace(temp_name, path)
+        temp_name = None
+    finally:
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
 
 
 def load_config(path: str | Path | None = None) -> Config:
@@ -112,6 +145,10 @@ def load_config(path: str | Path | None = None) -> Config:
 def config_from_mapping(raw: Any, path: Path) -> Config:
     if not isinstance(raw, dict):
         raise ConfigError("config root must be a mapping")
+
+    repo_dir_raw = raw.get("repo_dir", str(DEFAULT_REPO_DIR))
+    if not isinstance(repo_dir_raw, str) or not repo_dir_raw:
+        raise ConfigError("repo_dir must be a non-empty string")
 
     bridges_raw = raw.get("bridges", [])
     if bridges_raw is None:
@@ -180,6 +217,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
 
     return Config(
         path=path,
+        repo_dir=expand_path(repo_dir_raw),
         bridges=tuple(bridges),
         ai_skill_paths=destinations,
         sync=SyncConfig(
@@ -189,6 +227,59 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             default_destinations=tuple(default_destinations_raw),
         ),
     )
+
+
+def config_to_text(config: Config) -> str:
+    """Serialize config using the simple YAML subset supported by this package."""
+
+    lines: list[str] = [f"repo_dir: {_format_scalar(config.repo_dir)}", ""]
+
+    if config.bridges:
+        lines.append("bridges:")
+        for bridge in config.bridges:
+            lines.append(f"  - name: {_format_scalar(bridge.name)}")
+            if bridge.repo is not None:
+                lines.append(f"    repo: {_format_scalar(bridge.repo)}")
+            lines.append(f"    path: {_format_scalar(bridge.path)}")
+            lines.append(f"    skills_path: {_format_scalar(bridge.skills_path)}")
+            if bridge.branch is not None:
+                lines.append(f"    branch: {_format_scalar(bridge.branch)}")
+            lines.append(f"    enabled: {str(bridge.enabled).lower()}")
+    else:
+        lines.append("bridges: []")
+
+    lines.append("")
+    lines.append("ai_skill_paths:")
+    for key, value in sorted(config.ai_skill_paths.items()):
+        lines.append(f"  {key}: {_format_scalar(value)}")
+
+    lines.append("")
+    lines.append("sync:")
+    lines.append(f"  mode: {_format_scalar(config.sync.mode)}")
+    lines.append(f"  pull_before_sync: {str(config.sync.pull_before_sync).lower()}")
+    lines.append(f"  clone_if_missing: {str(config.sync.clone_if_missing).lower()}")
+    lines.append("  default_destinations:")
+    for destination in config.sync.default_destinations:
+        lines.append(f"    - {_format_scalar(destination)}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _format_scalar(value: str | Path) -> str:
+    text = str(value)
+    if not text:
+        return '""'
+    if "\n" in text or "\r" in text:
+        raise ConfigError("config values cannot contain newlines")
+    needs_quotes = (
+        text.strip() != text
+        or text[0] in "-[]{}#&*!|>'\"%@`"
+        or text.lower() in {"true", "false", "null", "~"}
+        or " #" in text
+    )
+    if not needs_quotes:
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def require_string(mapping: dict[str, Any], key: str, context: str) -> str:

@@ -73,7 +73,7 @@ def materialize_repositories_for_sync(
     *,
     dry_run: bool,
 ) -> RepositoryMaterialization:
-    """Clone or update selected enabled bridge repos for sync only."""
+    """Clone or update selected enabled repos for sync only."""
 
     selected, selection_errors = select_bridge_configs(config.bridges, selectors)
     if selection_errors:
@@ -105,7 +105,7 @@ def materialize_repositories_for_sync(
                 continue
             if not _is_git_repo_root(bridge.path):
                 errors.append(
-                    f"bridge {bridge.name}: pull_before_sync requires a git repo: {bridge.path}"
+                    f"repo {bridge.name}: pull_before_sync requires a git repo: {bridge.path}"
                 )
                 continue
             error = _pull_bridge(bridge)
@@ -137,30 +137,30 @@ def build_sync_plan(
     for discovery in selected:
         bridge = discovery.bridge
         if not bridge.enabled:
-            notices.append(f"SKIP bridge {bridge.name}: disabled")
+            notices.append(f"SKIP repo {bridge.name}: disabled")
             continue
         if not discovery.root_exists:
             if bridge.repo and config.sync.clone_if_missing:
                 if not dry_run:
                     errors.append(
-                        f"bridge {bridge.name}: local path missing after clone step: {bridge.path}"
+                        f"repo {bridge.name}: local path missing after clone step: {bridge.path}"
                     )
             else:
                 errors.append(
-                    f"bridge {bridge.name}: local path missing and clone is unavailable: {bridge.path}"
+                    f"repo {bridge.name}: local path missing and clone is unavailable: {bridge.path}"
                 )
             continue
         if not discovery.root_is_dir:
-            errors.append(f"bridge {bridge.name}: local path is not a directory: {bridge.path}")
+            errors.append(f"repo {bridge.name}: local path is not a directory: {bridge.path}")
             continue
         if not discovery.exists:
             errors.append(
-                f"bridge {bridge.name}: local skills path missing: {discovery.skills_dir}"
+                f"repo {bridge.name}: local skills path missing: {discovery.skills_dir}"
             )
             continue
         if discovery.missing_skill_md:
             errors.append(
-                f"bridge {bridge.name}: skill dirs missing SKILL.md: "
+                f"repo {bridge.name}: skill dirs missing SKILL.md: "
                 f"{len(discovery.missing_skill_md)}"
             )
             continue
@@ -213,10 +213,10 @@ def select_bridges(
     discoveries: tuple[BridgeDiscovery, ...], selectors: tuple[str, ...]
 ) -> tuple[tuple[BridgeDiscovery, ...], tuple[str, ...]]:
     if not selectors:
-        return (), ("sync requires at least one bridge selector",)
+        return (), ("sync requires at least one repo selector",)
     if "all" in selectors:
         if len(selectors) > 1:
-            return (), ("selector 'all' cannot be combined with bridge names or indexes",)
+            return (), ("selector 'all' cannot be combined with repo names or indexes",)
         return discoveries, ()
 
     selected: list[BridgeDiscovery] = []
@@ -225,7 +225,7 @@ def select_bridges(
         if selector.isdigit():
             index = int(selector)
             if index < 1 or index > len(discoveries):
-                errors.append(f"bridge index out of range: {selector}")
+                errors.append(f"repo index out of range: {selector}")
                 continue
             candidate = discoveries[index - 1]
         else:
@@ -235,10 +235,10 @@ def select_bridges(
                 if _bridge_matches_selector(item.bridge, selector)
             ]
             if not matches:
-                errors.append(f"unknown bridge selector: {selector}")
+                errors.append(f"unknown repo selector: {selector}")
                 continue
             if len(matches) > 1:
-                errors.append(f"ambiguous bridge selector: {selector}")
+                errors.append(f"ambiguous repo selector: {selector}")
                 continue
             candidate = matches[0]
         if candidate not in selected:
@@ -250,10 +250,10 @@ def select_bridge_configs(
     bridges: tuple[BridgeConfig, ...], selectors: tuple[str, ...]
 ) -> tuple[tuple[BridgeConfig, ...], tuple[str, ...]]:
     if not selectors:
-        return (), ("sync requires at least one bridge selector",)
+        return (), ("sync requires at least one repo selector",)
     if "all" in selectors:
         if len(selectors) > 1:
-            return (), ("selector 'all' cannot be combined with bridge names or indexes",)
+            return (), ("selector 'all' cannot be combined with repo names or indexes",)
         return bridges, ()
 
     selected: list[BridgeConfig] = []
@@ -262,16 +262,16 @@ def select_bridge_configs(
         if selector.isdigit():
             index = int(selector)
             if index < 1 or index > len(bridges):
-                errors.append(f"bridge index out of range: {selector}")
+                errors.append(f"repo index out of range: {selector}")
                 continue
             candidate = bridges[index - 1]
         else:
             matches = [item for item in bridges if _bridge_matches_selector(item, selector)]
             if not matches:
-                errors.append(f"unknown bridge selector: {selector}")
+                errors.append(f"unknown repo selector: {selector}")
                 continue
             if len(matches) > 1:
-                errors.append(f"ambiguous bridge selector: {selector}")
+                errors.append(f"ambiguous repo selector: {selector}")
                 continue
             candidate = matches[0]
         if candidate not in selected:
@@ -403,10 +403,10 @@ def _clone_bridge(bridge: BridgeConfig) -> str | None:
             check=False,
         )
     except OSError as exc:
-        return f"bridge {bridge.name}: git clone failed to start: {exc}"
+        return f"repo {bridge.name}: git clone failed to start: {exc}"
     if result.returncode != 0:
         return (
-            f"bridge {bridge.name}: git clone failed with exit {result.returncode}: "
+            f"repo {bridge.name}: git clone failed with exit {result.returncode}: "
             f"{_command_output(result)}"
         )
     return None
@@ -423,10 +423,10 @@ def _pull_bridge(bridge: BridgeConfig) -> str | None:
             check=False,
         )
     except OSError as exc:
-        return f"bridge {bridge.name}: git pull --ff-only failed to start: {exc}"
+        return f"repo {bridge.name}: git pull --ff-only failed to start: {exc}"
     if result.returncode != 0:
         return (
-            f"bridge {bridge.name}: git pull --ff-only failed with exit "
+            f"repo {bridge.name}: git pull --ff-only failed with exit "
             f"{result.returncode}: {_command_output(result)}"
         )
     return None
@@ -451,12 +451,12 @@ def _is_git_repo_root(path: Path) -> bool:
 def _clone_notice(bridge: BridgeConfig, *, dry_run: bool) -> str:
     verb = "PLAN" if dry_run else "CLONE"
     branch = f" --branch {bridge.branch}" if bridge.branch else ""
-    return f"{verb} bridge {bridge.name}: git clone{branch} {bridge.repo} {bridge.path}"
+    return f"{verb} repo {bridge.name}: git clone{branch} {bridge.repo} {bridge.path}"
 
 
 def _pull_notice(bridge: BridgeConfig, *, dry_run: bool) -> str:
     verb = "PLAN" if dry_run else "PULL"
-    return f"{verb} bridge {bridge.name}: git -C {bridge.path} pull --ff-only"
+    return f"{verb} repo {bridge.name}: git -C {bridge.path} pull --ff-only"
 
 
 def _command_output(result: subprocess.CompletedProcess[str]) -> str:

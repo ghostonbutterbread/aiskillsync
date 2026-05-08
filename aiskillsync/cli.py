@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +16,11 @@ from .config import (
     Config,
     ConfigError,
     DEFAULT_CONFIG_TEXT,
+    DEFAULT_REPO_DIR,
+    _format_scalar,
+    _split_key_value,
+    _strip_inline_comment,
+    atomic_write_text,
     config_from_mapping,
     default_config_path,
     ensure_default_config,
@@ -53,10 +57,16 @@ class SyncRequest:
     errors: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class ConfigTextBlock:
+    start: int
+    end: int
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aiskillsync",
-        description="Bridge AI skill directories into provider skill paths.",
+        description="Sync AI skill repos into provider skill paths.",
     )
     parser.add_argument("--version", action="version", version=f"aiskillsync {__version__}")
     parser.add_argument(
@@ -81,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_parser.set_defaults(func=cmd_config)
 
-    list_parser = subparsers.add_parser("list", help="show bridges and discovered skills")
+    list_parser = subparsers.add_parser("list", help="show repos and discovered skills")
     list_parser.set_defaults(func=cmd_list)
 
     doctor_parser = subparsers.add_parser("doctor", help="validate config and filesystem state")
@@ -93,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Plan or apply skill symlinks. Preferred syntax is destination-first: "
             "sync main, sync codex --repo bounty-harness, sync openclaw --repo <url>. "
-            "Legacy bridge-first syntax remains supported with --dest."
+            "Legacy repo-first selector syntax remains supported with --dest."
         ),
     )
     sync_parser.add_argument(
@@ -101,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         help=(
             "destination groups (main, codex, claude, ghost/openclaw, all) "
-            "or legacy bridge selectors"
+            "or legacy repo selectors"
         ),
     )
     sync_parser.add_argument(
@@ -115,8 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help=(
-            "configured bridge/repo name or repo URL to sync; repeat for multiple repos. "
-            "Unconfigured URLs are cloned under the aiskillsync cache on apply."
+            "configured repo name or repo URL to sync; repeat for multiple repos. "
+            "Unconfigured URLs are cloned under repo_dir on apply."
         ),
     )
     mode_group = sync_parser.add_mutually_exclusive_group()
@@ -131,6 +141,76 @@ def build_parser() -> argparse.ArgumentParser:
         help="create only missing destination symlinks",
     )
     sync_parser.set_defaults(func=cmd_sync)
+
+    repo_parser = subparsers.add_parser("repo", help="manage configured repos")
+    repo_subparsers = repo_parser.add_subparsers(dest="repo_command", required=True)
+
+    repo_add_parser = repo_subparsers.add_parser("add", help="add a repo to config")
+    repo_add_parser.add_argument("repo", metavar="repo-or-path", help="repo URL or local path to add")
+    repo_add_parser.add_argument(
+        "location",
+        nargs="?",
+        type=Path,
+        help="local checkout path for URL repos (default: repo_dir/<name>)",
+    )
+    repo_add_parser.add_argument("--name", help="configured repo name (default: repo slug or path basename)")
+    repo_add_parser.add_argument(
+        "--path",
+        dest="path",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
+    repo_add_parser.add_argument(
+        "--skills-path",
+        default="skills",
+        help="skills directory inside the repo (default: skills)",
+    )
+    repo_add_parser.add_argument("--branch", help="branch to clone when missing")
+    repo_add_parser.add_argument(
+        "--disabled",
+        action="store_true",
+        help="add the repo disabled",
+    )
+    repo_add_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview the config change without writing",
+    )
+    repo_add_parser.set_defaults(func=cmd_repo_add)
+
+    repo_remove_parser = repo_subparsers.add_parser("remove", help="remove a repo from config")
+    repo_remove_parser.add_argument("repo", help="repo name, index, or URL to remove")
+    repo_remove_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview the config change without writing",
+    )
+    repo_remove_parser.set_defaults(func=cmd_repo_remove)
+
+    add_parser = subparsers.add_parser("add", help="add a repo to config")
+    add_parser.add_argument("repo", metavar="repo-or-path", help="repo URL or local path to add")
+    add_parser.add_argument(
+        "location",
+        nargs="?",
+        type=Path,
+        help="local checkout path for URL repos (default: repo_dir/<name>)",
+    )
+    add_parser.add_argument("--name", help="configured repo name (default: repo slug or path basename)")
+    add_parser.add_argument("--path", type=Path, help=argparse.SUPPRESS)
+    add_parser.add_argument(
+        "--skills-path",
+        default="skills",
+        help="skills directory inside the repo (default: skills)",
+    )
+    add_parser.add_argument("--branch", help="branch to clone when missing")
+    add_parser.add_argument("--disabled", action="store_true", help="add the repo disabled")
+    add_parser.add_argument("--dry-run", action="store_true", help="preview the config change without writing")
+    add_parser.set_defaults(func=cmd_repo_add)
+
+    remove_parser = subparsers.add_parser("remove", help="remove a repo from config")
+    remove_parser.add_argument("repo", help="repo name, index, or URL to remove")
+    remove_parser.add_argument("--dry-run", action="store_true", help="preview the config change without writing")
+    remove_parser.set_defaults(func=cmd_repo_remove)
     return parser
 
 
@@ -158,8 +238,7 @@ def cmd_init(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         )
         return 1
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
+    atomic_write_text(config_path, DEFAULT_CONFIG_TEXT)
     print(f"Wrote config: {config_path}", file=stdout)
     return 0
 
@@ -172,7 +251,9 @@ def cmd_config(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     config = _load_config(args)
     print(f"Config: {config.path}", file=stdout)
     print("", file=stdout)
-    print("Bridges:", file=stdout)
+    print(f"Repo directory: {config.repo_dir}", file=stdout)
+    print("", file=stdout)
+    print("Repos:", file=stdout)
     if config.bridges:
         for index, bridge in enumerate(config.bridges, start=1):
             state = "enabled" if bridge.enabled else "disabled"
@@ -212,7 +293,7 @@ def cmd_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     skills = enabled_skills(discoveries)
     summary = destination_summary(config.ai_skill_paths, skills)
 
-    print("Bridges:", file=stdout)
+    print("Repos:", file=stdout)
     if not discoveries:
         print("  none", file=stdout)
     for index, discovery in enumerate(discoveries, start=1):
@@ -270,6 +351,84 @@ def cmd_doctor(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     _print_skill_conflicts(report.duplicate_skill_names, stdout)
     _print_destination_classification(config, report.bridge_discoveries, stdout)
     return 1 if report.has_errors else 0
+
+
+def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    config = _load_config(args)
+    location = getattr(args, "location", None)
+    path_alias = args.path
+    if location is not None and path_alias is not None:
+        print("aiskillsync: use either positional location or --path, not both", file=stderr)
+        return 2
+
+    source_is_local_path = _looks_like_local_path(args.repo)
+    if source_is_local_path and (location is not None or path_alias is not None):
+        print("aiskillsync: local path repos use the first argument as their path", file=stderr)
+        return 2
+
+    source_path = expand_path(args.repo) if source_is_local_path else None
+    name = args.name or (
+        _repo_name_from_path(source_path) if source_path is not None else _repo_slug(args.repo)
+    )
+    if not _valid_repo_name(name):
+        print(f"aiskillsync: invalid repo name: {name!r}", file=stderr)
+        return 2
+    if not args.skills_path:
+        print("aiskillsync: --skills-path must be non-empty", file=stderr)
+        return 2
+
+    location_path = path_alias if path_alias is not None else location
+    config_text = _read_config_text(config.path)
+    path_literal = _repo_add_path_literal(config_text, args.repo, source_path, location_path, name)
+    path = source_path or expand_path(path_literal)
+    new_repo = BridgeConfig(
+        name=name,
+        repo=None if source_path is not None else args.repo,
+        path=path,
+        skills_path=args.skills_path,
+        branch=args.branch,
+        enabled=not args.disabled,
+    )
+
+    errors = _repo_add_conflicts(config, new_repo)
+    if errors:
+        for error in errors:
+            print(f"aiskillsync: {error}", file=stderr)
+        return 1
+
+    state = "enabled" if new_repo.enabled else "disabled"
+    if args.dry_run:
+        print(
+            f"Would add repo {new_repo.name} ({state}): "
+            f"{_repo_source_label(new_repo)} -> {new_repo.path}",
+            file=stdout,
+        )
+        return 0
+
+    _write_config_bridge_add(config.path, config_text, new_repo, path_literal)
+    print(f"Added repo {new_repo.name} ({state}): {_repo_source_label(new_repo)}", file=stdout)
+    print(f"Local path: {new_repo.path}", file=stdout)
+    print("No repo directory was cloned or modified", file=stdout)
+    return 0
+
+
+def cmd_repo_remove(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    config = _load_config(args)
+    repo, index, errors = _select_configured_repo_with_index(config, args.repo)
+    if errors:
+        for error in errors:
+            print(f"aiskillsync: {error}", file=stderr)
+        return 1
+
+    if args.dry_run:
+        print(f"Would remove repo {repo.name} from config", file=stdout)
+        print(f"Local path would be left untouched: {repo.path}", file=stdout)
+        return 0
+
+    _write_config_bridge_remove(config.path, _read_config_text(config.path), index)
+    print(f"Removed repo {repo.name} from config", file=stdout)
+    print(f"Left local path untouched: {repo.path}", file=stdout)
+    return 0
 
 
 def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
@@ -381,17 +540,26 @@ def _with_adhoc_repositories(
     bridges = list(config.bridges)
     resolved_selectors: list[str] = []
     notices: list[str] = []
+    errors: list[str] = []
 
     for selector in selectors:
         if not _looks_like_repo_url(selector) or _configured_repo_url(config, selector):
             resolved_selectors.append(selector)
             continue
 
-        bridge = _adhoc_bridge_for_url(selector)
+        bridge = _adhoc_bridge_for_url(config, selector)
+        path_owner = _configured_repo_by_path(config, bridge.path)
+        if path_owner is not None:
+            errors.append(
+                f"repo URL {selector} resolves to {bridge.path}, already used by "
+                f"configured repo {path_owner.name}"
+            )
+            resolved_selectors.append(bridge.name)
+            continue
         bridges.append(bridge)
         resolved_selectors.append(bridge.name)
         notices.append(
-            f"ADHOC bridge {bridge.name}: {bridge.repo} -> {bridge.path}"
+            f"ADHOC repo {bridge.name}: {bridge.repo} -> {bridge.path}"
         )
 
     if len(bridges) == len(config.bridges):
@@ -399,6 +567,7 @@ def _with_adhoc_repositories(
     else:
         resolved_config = Config(
             path=config.path,
+            repo_dir=config.repo_dir,
             bridges=tuple(bridges),
             ai_skill_paths=config.ai_skill_paths,
             sync=config.sync,
@@ -408,7 +577,247 @@ def _with_adhoc_repositories(
         repo_selectors=tuple(resolved_selectors),
         destinations=destinations,
         notices=tuple(notices),
+        errors=tuple(errors),
     )
+
+
+def _read_config_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"could not read config {path}: {exc}") from exc
+
+
+def _repo_add_path_literal(
+    config_text: str,
+    repo_arg: str,
+    source_path: Path | None,
+    location_path: Path | None,
+    name: str,
+) -> str:
+    if source_path is not None:
+        return repo_arg
+    if location_path is not None:
+        return str(location_path)
+    repo_dir_literal = _top_level_string_value(config_text, "repo_dir")
+    if repo_dir_literal is None:
+        repo_dir_literal = str(DEFAULT_REPO_DIR)
+    return str(Path(repo_dir_literal) / name)
+
+
+def _top_level_string_value(text: str, key: str) -> str | None:
+    raw = parse_simple_yaml(text)
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _write_config_bridge_add(
+    path: Path, original_text: str, bridge: BridgeConfig, path_literal: str
+) -> None:
+    try:
+        updated = _add_bridge_entry_text(original_text, bridge, path_literal)
+        atomic_write_text(path, updated)
+    except OSError as exc:
+        raise ConfigError(f"could not write config {path}: {exc}") from exc
+
+
+def _write_config_bridge_remove(path: Path, original_text: str, bridge_index: int) -> None:
+    try:
+        updated = _remove_bridge_entry_text(original_text, bridge_index)
+        atomic_write_text(path, updated)
+    except OSError as exc:
+        raise ConfigError(f"could not write config {path}: {exc}") from exc
+
+
+def _add_bridge_entry_text(text: str, bridge: BridgeConfig, path_literal: str) -> str:
+    text = _ensure_repo_dir_text(text)
+    lines = text.splitlines(keepends=True)
+    newline = _preferred_newline(text)
+    block = _find_top_level_block(lines, "bridges")
+    if block is None:
+        prefix = text
+        if prefix and not prefix.endswith(("\n", "\r")):
+            prefix += newline
+        if prefix and prefix.strip():
+            prefix += newline
+        return prefix + "bridges:" + newline + _bridge_entry_text(
+            bridge, path_literal, newline, "  "
+        )
+
+    indent = _bridge_item_indent(lines, block) or "  "
+    entry = _bridge_entry_text(bridge, path_literal, newline, indent).splitlines(
+        keepends=True
+    )
+    insert_at = _bridge_insert_index(lines, block)
+    if _top_level_value_is_empty_list(lines[block.start]):
+        lines[block.start] = _set_key_line_value(lines[block.start], "")
+        insert_at = block.start + 1
+    lines[insert_at:insert_at] = entry
+    return "".join(lines)
+
+
+def _ensure_repo_dir_text(text: str) -> str:
+    if _top_level_string_value(text, "repo_dir") is not None:
+        return text
+    lines = text.splitlines(keepends=True)
+    newline = _preferred_newline(text)
+    insert_at = 0
+    while insert_at < len(lines) and _logical_line(lines[insert_at]) is None:
+        insert_at += 1
+    lines[insert_at:insert_at] = [f"repo_dir: {DEFAULT_REPO_DIR}{newline}", newline]
+    return "".join(lines)
+
+
+def _remove_bridge_entry_text(text: str, bridge_index: int) -> str:
+    lines = text.splitlines(keepends=True)
+    block = _find_top_level_block(lines, "bridges")
+    if block is None:
+        raise ConfigError("config has no bridges block")
+    spans = _bridge_item_spans(lines, block)
+    if bridge_index < 0 or bridge_index >= len(spans):
+        raise ConfigError(f"could not locate bridges[{bridge_index + 1}] in config text")
+
+    if len(spans) == 1:
+        updated = [*lines[: block.start + 1], *lines[block.end :]]
+        updated[block.start] = _set_key_line_value(lines[block.start], "[]")
+        return "".join(updated)
+
+    remove_start, remove_end = spans[bridge_index]
+    return "".join([*lines[:remove_start], *lines[remove_end:]])
+
+
+def _find_top_level_block(lines: list[str], key: str) -> ConfigTextBlock | None:
+    start: int | None = None
+    for index, line in enumerate(lines):
+        logical = _logical_line(line)
+        if logical is None:
+            continue
+        indent, content = logical
+        key_value = _split_key_value(content)
+        if indent == 0 and key_value is not None and key_value[0] == key:
+            start = index
+            break
+    if start is None:
+        return None
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        logical = _logical_line(lines[index])
+        if logical is None:
+            continue
+        indent, content = logical
+        if indent == 0 and _split_key_value(content) is not None:
+            end = index
+            break
+    return ConfigTextBlock(start=start, end=end)
+
+
+def _bridge_item_spans(
+    lines: list[str], block: ConfigTextBlock
+) -> list[tuple[int, int]]:
+    candidates: list[tuple[int, int]] = []
+    for index in range(block.start + 1, block.end):
+        logical = _logical_line(lines[index])
+        if logical is None:
+            continue
+        indent, content = logical
+        if indent > 0 and content.startswith("- "):
+            candidates.append((index, indent))
+
+    if not candidates:
+        return []
+    item_indent = min(indent for _, indent in candidates)
+    starts = [index for index, indent in candidates if indent == item_indent]
+
+    spans: list[tuple[int, int]] = []
+    content_end = _bridge_content_end(lines, block)
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else content_end
+        spans.append((start, end))
+    return spans
+
+
+def _bridge_item_indent(lines: list[str], block: ConfigTextBlock) -> str | None:
+    spans = _bridge_item_spans(lines, block)
+    if not spans:
+        return None
+    line = lines[spans[0][0]]
+    return line[: len(line) - len(line.lstrip(" "))]
+
+
+def _bridge_insert_index(lines: list[str], block: ConfigTextBlock) -> int:
+    return _bridge_content_end(lines, block)
+
+
+def _bridge_content_end(lines: list[str], block: ConfigTextBlock) -> int:
+    insert_at = block.end
+    while insert_at > block.start + 1 and _is_blank_or_comment(lines[insert_at - 1]):
+        insert_at -= 1
+    return insert_at
+
+
+def _bridge_entry_text(
+    bridge: BridgeConfig, path_literal: str, newline: str, item_indent: str
+) -> str:
+    child_indent = item_indent + "  "
+    lines = [
+        f"{item_indent}- name: {_format_scalar(bridge.name)}",
+    ]
+    if bridge.repo is not None:
+        lines.append(f"{child_indent}repo: {_format_scalar(bridge.repo)}")
+    lines.extend(
+        [
+            f"{child_indent}path: {_format_scalar(path_literal)}",
+            f"{child_indent}skills_path: {_format_scalar(bridge.skills_path)}",
+        ]
+    )
+    if bridge.branch is not None:
+        lines.append(f"{child_indent}branch: {_format_scalar(bridge.branch)}")
+    lines.append(f"{child_indent}enabled: {str(bridge.enabled).lower()}")
+    return newline.join(lines) + newline
+
+
+def _logical_line(line: str) -> tuple[int, str] | None:
+    body = line.rstrip("\r\n").rstrip()
+    without_comment = _strip_inline_comment(body)
+    if not without_comment.strip():
+        return None
+    indent = len(without_comment) - len(without_comment.lstrip(" "))
+    return indent, without_comment.strip()
+
+
+def _is_blank_or_comment(line: str) -> bool:
+    return _logical_line(line) is None
+
+
+def _top_level_value_is_empty_list(line: str) -> bool:
+    logical = _logical_line(line)
+    if logical is None:
+        return False
+    _, content = logical
+    key_value = _split_key_value(content)
+    return key_value is not None and key_value[1] == "[]"
+
+
+def _set_key_line_value(line: str, value: str) -> str:
+    body = line.rstrip("\r\n")
+    newline = line[len(body) :]
+    logical = _strip_inline_comment(body)
+    comment = body[len(logical) :]
+    key = logical.split(":", 1)[0].rstrip()
+    if value:
+        updated = f"{key}: {value}"
+    else:
+        updated = f"{key}:"
+    if comment:
+        updated = f"{updated} {comment.lstrip()}"
+    return updated + newline
+
+
+def _preferred_newline(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
 
 
 def _configured_repo_url(config: Config, repo_url: str) -> bool:
@@ -426,11 +835,24 @@ def _looks_like_repo_url(value: str) -> bool:
     return "@" in value and ":" in value
 
 
+def _looks_like_local_path(value: str) -> bool:
+    if _looks_like_repo_url(value):
+        return False
+    path = expand_path(value)
+    if path.exists():
+        return True
+    if value.startswith(("~", ".", "/", "\\")):
+        return True
+    if "/" in value or "\\" in value:
+        return True
+    return bool(Path(value).suffix)
+
+
 def _normalize_repo_url(value: str) -> str:
     return value.strip().rstrip("/")
 
 
-def _adhoc_bridge_for_url(repo_url: str) -> BridgeConfig:
+def _adhoc_bridge_for_url(config: Config, repo_url: str) -> BridgeConfig:
     normalized = _normalize_repo_url(repo_url)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
     slug = _repo_slug(normalized)
@@ -438,7 +860,7 @@ def _adhoc_bridge_for_url(repo_url: str) -> BridgeConfig:
     return BridgeConfig(
         name=name,
         repo=repo_url,
-        path=_default_repo_cache_dir() / name,
+        path=config.repo_dir / name,
         skills_path="skills",
         branch=None,
         enabled=True,
@@ -454,18 +876,95 @@ def _repo_slug(repo_url: str) -> str:
     return slug or "repo"
 
 
-def _default_repo_cache_dir() -> Path:
-    root = os.environ.get("XDG_CACHE_HOME")
-    if root:
-        return expand_path(root) / "aiskillsync" / "repos"
-    return expand_path("~/.cache/aiskillsync/repos")
+def _repo_name_from_path(path: Path) -> str:
+    name = path.name
+    if name in {"", ".", ".."}:
+        name = _canonical_path(path).name
+    return name
+
+
+def _repo_source_label(repo: BridgeConfig) -> str:
+    return repo.repo if repo.repo is not None else "local path"
+
+
+def _configured_repo_by_path(config: Config, path: Path) -> BridgeConfig | None:
+    canonical_path = _canonical_path(path)
+    for bridge in config.bridges:
+        if _canonical_path(bridge.path) == canonical_path:
+            return bridge
+    return None
+
+
+def _repo_add_conflicts(config: Config, repo: BridgeConfig) -> tuple[str, ...]:
+    errors: list[str] = []
+    if any(bridge.name == repo.name for bridge in config.bridges):
+        errors.append(f"repo name already configured: {repo.name}")
+    if any(
+        bridge.repo is not None
+        and repo.repo is not None
+        and _normalize_repo_url(bridge.repo) == _normalize_repo_url(repo.repo)
+        for bridge in config.bridges
+    ):
+        errors.append(f"repo URL already configured: {repo.repo}")
+    path_owner = _configured_repo_by_path(config, repo.path)
+    if path_owner is not None:
+        errors.append(f"local path already used by repo {path_owner.name}: {repo.path}")
+    if repo.path.exists() and not repo.path.is_dir():
+        errors.append(f"local path exists and is not a directory: {repo.path}")
+    return tuple(errors)
+
+
+def _select_configured_repo(
+    config: Config, selector: str
+) -> tuple[BridgeConfig | None, tuple[str, ...]]:
+    repo, _, errors = _select_configured_repo_with_index(config, selector)
+    return repo, errors
+
+
+def _select_configured_repo_with_index(
+    config: Config, selector: str
+) -> tuple[BridgeConfig | None, int, tuple[str, ...]]:
+    if selector.isdigit():
+        index = int(selector)
+        if index < 1 or index > len(config.bridges):
+            return None, -1, (f"repo index out of range: {selector}",)
+        return config.bridges[index - 1], index - 1, ()
+
+    matches = [
+        (index, bridge)
+        for index, bridge in enumerate(config.bridges)
+        if bridge.name == selector
+        or (
+            bridge.repo is not None
+            and _normalize_repo_url(bridge.repo) == _normalize_repo_url(selector)
+        )
+    ]
+    if not matches:
+        return None, -1, (f"unknown repo: {selector}",)
+    if len(matches) > 1:
+        return None, -1, (f"ambiguous repo: {selector}",)
+    index, bridge = matches[0]
+    return bridge, index, ()
+
+
+def _valid_repo_name(value: str) -> bool:
+    if not value or value in {".", ".."}:
+        return False
+    return all(char.isalnum() or char in {"-", "_", "."} for char in value)
+
+
+def _canonical_path(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path.absolute()
 
 
 def _print_bridge_name_checks(duplicates: tuple[str, ...], stdout: TextIO) -> None:
     if duplicates:
-        print(f"FAIL bridge names unique: {', '.join(duplicates)}", file=stdout)
+        print(f"FAIL repo names unique: {', '.join(duplicates)}", file=stdout)
     else:
-        print("OK bridge names unique", file=stdout)
+        print("OK repo names unique", file=stdout)
 
 
 def _print_destination_checks(
@@ -489,7 +988,7 @@ def _print_destination_checks(
 def _print_bridge_checks(discoveries: tuple[BridgeDiscovery, ...], stdout: TextIO) -> None:
     for discovery in discoveries:
         bridge = discovery.bridge
-        prefix = f"bridge {bridge.name}:"
+        prefix = f"repo {bridge.name}:"
         if not bridge.enabled:
             print(f"SKIP {prefix} disabled", file=stdout)
             if not discovery.root_exists:
@@ -515,9 +1014,9 @@ def _print_bridge_checks(discoveries: tuple[BridgeDiscovery, ...], stdout: TextI
             continue
 
         if not bridge.skills_path:
-            print(f"FAIL {prefix} enabled bridge has skills_path", file=stdout)
+            print(f"FAIL {prefix} enabled repo has skills_path", file=stdout)
         else:
-            print(f"OK {prefix} enabled bridge has skills_path", file=stdout)
+            print(f"OK {prefix} enabled repo has skills_path", file=stdout)
 
         if not discovery.root_exists:
             if bridge.repo:
@@ -538,7 +1037,7 @@ def _print_bridge_checks(discoveries: tuple[BridgeDiscovery, ...], stdout: TextI
             print(f"OK {prefix} local skills path exists: {discovery.skills_dir}", file=stdout)
         else:
             print(
-                f"FAIL {prefix} local skills path missing under existing bridge root: "
+                f"FAIL {prefix} local skills path missing under existing repo root: "
                 f"{discovery.skills_dir}",
                 file=stdout,
             )
@@ -553,7 +1052,7 @@ def _print_skill_conflicts(
     conflicts: dict[str, tuple[object, ...]], stdout: TextIO
 ) -> None:
     if not conflicts:
-        print("OK duplicate skill names across enabled bridges: none", file=stdout)
+        print("OK duplicate skill names across enabled repos: none", file=stdout)
         return
     for name, skills in conflicts.items():
         locations = ", ".join(str(skill.path) for skill in skills)
@@ -584,7 +1083,7 @@ def _print_sync_plan(plan: SyncPlan, stdout: TextIO) -> None:
         bridges = ", ".join(item.bridge.name for item in plan.selected_discoveries)
     else:
         bridges = "-"
-    print(f"Bridges: {bridges}", file=stdout)
+    print(f"Repos: {bridges}", file=stdout)
     print(
         "Destinations: " + (", ".join(plan.destinations) if plan.destinations else "-"),
         file=stdout,
