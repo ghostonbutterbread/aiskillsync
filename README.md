@@ -6,31 +6,57 @@ This repo is intended to replace per-project `sync_skills.sh` scripts with one
 config-driven sync layer that can bridge skills from multiple repos into AI
 provider skill directories.
 
-## Implemented CLI
+## Installation
 
-Run the stdlib-only module entrypoint from this repo:
+Install as an isolated CLI with pipx:
+
+```bash
+pipx install .
+aiskillsync --help
+aiskillsync init --dry-run
+```
+
+Or install into the active Python environment with pip:
+
+```bash
+python3 -m pip install .
+aiskillsync --help
+```
+
+The source-tree module entrypoint still works without installation:
 
 ```bash
 python3 -m aiskillsync --help
-python3 -m aiskillsync init --dry-run
-python3 -m aiskillsync config --default
-python3 -m aiskillsync config
-python3 -m aiskillsync list
-python3 -m aiskillsync doctor
-python3 -m aiskillsync sync main
-python3 -m aiskillsync sync codex --repo bounty-harness
-python3 -m aiskillsync sync openclaw --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
-python3 -m aiskillsync sync all
-python3 -m aiskillsync sync bounty-harness --dest codex --dest claude
-python3 -m aiskillsync sync 1 2 --apply
 ```
+
+## Implemented CLI
+
+Run the installed console script:
+
+```bash
+aiskillsync --help
+aiskillsync init --dry-run
+aiskillsync config --default
+aiskillsync config
+aiskillsync list
+aiskillsync doctor
+aiskillsync sync main
+aiskillsync sync codex --repo bounty-harness
+aiskillsync sync openclaw --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
+aiskillsync sync all
+aiskillsync sync bounty-harness --dest codex --dest claude
+aiskillsync sync 1 2 --apply
+```
+
+You can replace `aiskillsync` with `python3 -m aiskillsync` when running from a
+checkout or an environment where the console script is not on `PATH`.
 
 Use `--config` to point at a non-default config:
 
 ```bash
-python3 -m aiskillsync --config ./config.yaml list
-python3 -m aiskillsync --config ./config.yaml doctor
-python3 -m aiskillsync --config ./config.yaml sync all --dry-run
+aiskillsync --config ./config.yaml list
+aiskillsync --config ./config.yaml doctor
+aiskillsync --config ./config.yaml sync all --dry-run
 ```
 
 On first run, normal commands that use the default config path create
@@ -135,11 +161,11 @@ Repo selection is optional and defaults to all configured bridges. Use
 repeatable `--repo` flags to select configured bridge names or repo URLs:
 
 ```bash
-python3 -m aiskillsync sync main
-python3 -m aiskillsync sync codex
-python3 -m aiskillsync sync openclaw --repo bounty-harness
-python3 -m aiskillsync sync main --repo bounty-harness --repo bounty-tools
-python3 -m aiskillsync sync codex --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
+aiskillsync sync main
+aiskillsync sync codex
+aiskillsync sync openclaw --repo bounty-harness
+aiskillsync sync main --repo bounty-harness --repo bounty-tools
+aiskillsync sync codex --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
 ```
 
 If a `--repo` URL matches an existing configured bridge URL, aiskillsync uses
@@ -155,10 +181,10 @@ bridges into `sync.default_destinations`, and repeated `--dest` flags still
 select legacy destinations:
 
 ```bash
-python3 -m aiskillsync sync all
-python3 -m aiskillsync sync bounty-harness
-python3 -m aiskillsync sync 1 2
-python3 -m aiskillsync sync bounty-harness --dest codex --dest claude
+aiskillsync sync all
+aiskillsync sync bounty-harness
+aiskillsync sync 1 2
+aiskillsync sync bounty-harness --dest codex --dest claude
 ```
 
 Ghost/OpenClaw is not touched unless it is explicitly selected with
@@ -192,10 +218,15 @@ from `https://github.com/ghostonbutterbread/bug-bounty-harness.git` on branch
 `master` before source discovery:
 
 ```bash
-python3 scripts/migrate_aiskillsync_personal.py --list-sources
-python3 scripts/migrate_aiskillsync_personal.py --apply
-python3 scripts/migrate_aiskillsync_personal.py --backup-differs --apply
+aiskillsync-migrate-personal --list-sources
+aiskillsync-migrate-personal --apply
+aiskillsync-migrate-personal --backup-differs --apply
 ```
 
 By default it processes `~/.codex/skills` and `~/.claude/skills` only.
 Ghost/OpenClaw remains excluded unless explicitly selected with `--dest ghost`.
+From a source checkout, the script path also remains supported:
+
+```bash
+python3 scripts/migrate_aiskillsync_personal.py --list-sources
+```
