@@ -42,6 +42,9 @@ aiskillsync config --default
 aiskillsync config
 aiskillsync list
 aiskillsync doctor
+aiskillsync add https://github.com/example/ai-skills.git
+aiskillsync add https://github.com/example/ai-skills.git ~/projects/ai-skills
+aiskillsync remove ai-skills
 aiskillsync sync main
 aiskillsync sync codex --repo bounty-harness
 aiskillsync sync openclaw --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
@@ -75,24 +78,25 @@ The current implementation covers Phase 1, Phase 2, and Phase 3 from
 `docs/AISKILLSYNC_SPEC.md`:
 
 - config loading with `~` and environment variable path expansion
-- bridge and skill discovery
+- repo and skill discovery
 - destination classification
+- repo add/remove config management
 - `list` and `doctor` reporting
 - safe dry-run sync planning
-- sync-only bridge clone/pull materialization
+- sync-only repo clone/pull materialization
 - optional `sync --apply` creation of missing symlinks only
 
 `sync` is dry-run by default. `--apply` is intentionally narrow in Phase 3: it
-may first clone missing selected enabled bridge roots when `bridge.repo` exists
+may first clone missing selected enabled repo roots when `repo` exists
 and `sync.clone_if_missing` is true, or pull existing selected enabled git
-bridge roots when `sync.pull_before_sync` is true. It then creates destination
+repo roots when `sync.pull_before_sync` is true. It then creates destination
 symlinks that are missing. Existing correct symlinks are skipped, and existing
 directories, files, or symlinks to unexpected targets are conflicts that block
 the whole apply. It does not delete, adopt, back up, or replace existing
 entries; those behaviors are reserved for Phase 4.
 
-Reserved future commands are tracked in the spec but intentionally not exposed
-yet: `add` and `remove`.
+`add` and `remove` are exposed as repo-first convenience commands and mirror
+`repo add` / `repo remove`.
 
 ## Config
 
@@ -105,6 +109,8 @@ Default path:
 Example:
 
 ```yaml
+repo_dir: ~/.config/aiskillsync/repos
+
 bridges:
   - name: bounty-harness
     repo: https://github.com/ghostonbutterbread/bug-bounty-harness.git
@@ -136,18 +142,40 @@ template before loading it. `config --default` only prints the template.
 
 ## Discovery Commands
 
-`list` shows each configured bridge, whether it is enabled, its local path,
+`list` shows each configured repo, whether it is enabled, its local path,
 repo URL, branch, discovered skill count, skill names, and a destination status
 summary.
 
-`doctor` validates that the config exists and parses, bridge names are unique,
-enabled bridge local paths exist or have a repo URL, enabled bridge
+`doctor` validates that the config exists and parses, repo names are unique,
+enabled repo local paths exist or have a repo URL, enabled repo
 `skills_path` directories exist when the local path already exists, skill
-directories contain `SKILL.md`, enabled bridges do not export duplicate skill
+directories contain `SKILL.md`, enabled repos do not export duplicate skill
 names, and destination entries are classified as missing, already linked,
-regular directory/copy, unexpected symlink, or path conflict. Disabled bridge
-checks are reported as `SKIP` unless a global check, such as duplicate bridge
+regular directory/copy, unexpected symlink, or path conflict. Disabled repo
+checks are reported as `SKIP` unless a global check, such as duplicate repo
 names, still affects the exit status.
+
+## Repo Management
+
+Add a repo URL to the config. If no local location is given, aiskillsync uses
+`repo_dir/<repo-name>`; by default `repo_dir` is
+`~/.config/aiskillsync/repos`. This updates config only; the repo is cloned on
+the next `sync --apply` when selected.
+
+```bash
+aiskillsync add https://github.com/org/ai-skills.git
+aiskillsync add https://github.com/org/ai-skills.git ~/projects/ai-skills
+aiskillsync repo add https://github.com/org/ai-skills.git --name ai-skills --branch main
+aiskillsync add ~/projects/local-skill-repo
+```
+
+Remove a repo from config without deleting its local checkout or any provider
+skill symlinks:
+
+```bash
+aiskillsync remove ai-skills
+aiskillsync repo remove https://github.com/org/ai-skills.git
+```
 
 ## Sync Command
 
@@ -159,8 +187,8 @@ names, still affects the exit status.
 - `ghost` or `openclaw`: Ghost/OpenClaw only
 - `all`: every configured destination when used with `--repo`
 
-Repo selection is optional and defaults to all configured bridges. Use
-repeatable `--repo` flags to select configured bridge names or repo URLs:
+Repo selection is optional and defaults to all configured repos. Use
+repeatable `--repo` flags to select configured repo names or repo URLs:
 
 ```bash
 aiskillsync sync main
@@ -170,16 +198,16 @@ aiskillsync sync main --repo bounty-harness --repo bounty-tools
 aiskillsync sync codex --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
 ```
 
-If a `--repo` URL matches an existing configured bridge URL, aiskillsync uses
-that bridge's configured local path and does not create a duplicate clone. An
-unconfigured repo URL is treated as an ad-hoc bridge for this run only. Its
-deterministic clone path is
-`${XDG_CACHE_HOME:-~/.cache}/aiskillsync/repos/<repo-slug>-<url-hash>`. If that
-path already exists, normal sync safety checks apply; aiskillsync does not
-delete or replace it.
+If a `--repo` URL matches an existing configured repo URL, aiskillsync uses
+that repo's configured local path and does not create a duplicate clone. An
+unconfigured repo URL is treated as an ad-hoc repo for this run only. Its
+deterministic clone path is `repo_dir/<repo-slug>-<url-hash>`, so the default is
+`~/.config/aiskillsync/repos/<repo-slug>-<url-hash>`. If that path already
+exists, normal sync safety checks apply; aiskillsync does not delete or replace
+it.
 
-The old bridge-first syntax remains supported. `sync all` still means all
-bridges into `sync.default_destinations`, and repeated `--dest` flags still
+The old repo-first selector syntax remains supported. `sync all` still means all
+repos into `sync.default_destinations`, and repeated `--dest` flags still
 select legacy destinations:
 
 ```bash
@@ -194,13 +222,13 @@ Ghost/OpenClaw is not touched unless it is explicitly selected with
 --repo ...`, or included in `sync.default_destinations`.
 
 Only `sync.mode: symlink` is supported. Dry-run never runs git and never
-mutates bridge or destination paths; it reports planned `PLAN` clone and pull
+mutates repo or destination paths; it reports planned `PLAN` clone and pull
 steps. `--apply` may run `git clone`, including `--branch <branch>` when a
-bridge branch is configured, for missing selected enabled bridge roots with a
-repo URL and `sync.clone_if_missing: true`. For existing selected enabled bridge
+repo branch is configured, for missing selected enabled repo roots with a
+repo URL and `sync.clone_if_missing: true`. For existing selected enabled repo
 roots with `sync.pull_before_sync: true`, `--apply` requires the path to be a
 git repo and runs `git -C <path> pull --ff-only`; any non-zero pull blocks the
-sync before symlink creation. Disabled bridges are never cloned or pulled.
+sync before symlink creation. Disabled repos are never cloned or pulled.
 
 ## Verification
 
