@@ -29,6 +29,8 @@ The source-tree module entrypoint still works without installation:
 python3 -m aiskillsync --help
 ```
 
+Packaged installs expose only the `aiskillsync` console script.
+
 ## Implemented CLI
 
 Run the installed console script:
@@ -218,15 +220,12 @@ from `https://github.com/ghostonbutterbread/bug-bounty-harness.git` on branch
 `master` before source discovery:
 
 ```bash
-aiskillsync-migrate-personal --list-sources
-aiskillsync-migrate-personal --apply
-aiskillsync-migrate-personal --backup-differs --apply
+python3 scripts/migrate_aiskillsync_personal.py --list-sources
+python3 scripts/migrate_aiskillsync_personal.py --apply
+python3 scripts/migrate_aiskillsync_personal.py --backup-differs --apply
 ```
 
 By default it processes `~/.codex/skills` and `~/.claude/skills` only.
 Ghost/OpenClaw remains excluded unless explicitly selected with `--dest ghost`.
-From a source checkout, the script path also remains supported:
-
-```bash
-python3 scripts/migrate_aiskillsync_personal.py --list-sources
-```
+This helper is intentionally source-checkout only and is not exposed as a
+packaged console command.
