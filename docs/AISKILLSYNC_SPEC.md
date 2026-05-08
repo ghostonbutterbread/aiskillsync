@@ -111,7 +111,8 @@ aiskillsync sync codex --repo bounty-harness
 aiskillsync sync openclaw --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
 aiskillsync sync all
 aiskillsync sync bounty-harness --dest codex --dest claude
-aiskillsync sync 1 2 --apply
+aiskillsync sync 1 2
+aiskillsync sync all --dry-run
 aiskillsync add https://github.com/org/ai-skills.git
 aiskillsync add https://github.com/org/ai-skills.git ~/projects/ai-skills
 aiskillsync remove ai-skills
@@ -205,7 +206,8 @@ aiskillsync sync all --adopt
 
 Default behavior:
 
-- dry-run unless `--apply` is passed.
+- apply unless `--dry-run` is passed. `--apply` remains accepted as a
+  backwards-compatible explicit no-op.
 - Destination-first syntax is preferred:
   - `main` selects `codex` and `claude`.
   - `codex` selects only the Codex destination.
@@ -226,15 +228,23 @@ Default behavior:
   a repeatable legacy destination filter.
 - Dry-run reports planned clone and pull work but does not run git or mutate the
   filesystem.
-- Apply clones a missing selected enabled repo root when `repo` exists
+- Default sync clones a missing selected enabled repo root when `repo` exists
   and `sync.clone_if_missing` is true. If `branch` is configured, clone uses
   `git clone --branch <branch> <repo> <path>`; otherwise it uses
   `git clone <repo> <path>`.
-- Apply updates an existing selected enabled repo root when
+- Default sync updates an existing selected enabled repo root when
   `sync.pull_before_sync` is true, but only if the path is a git repo. The
   update command is `git -C <path> pull --ff-only`; a non-zero exit blocks sync.
 - Disabled repos are not cloned or pulled.
 - Link source skill dirs into destination skill dirs.
+- Sync output ends with a summary of repo action counts
+  (`planned`/`cloned`/`pulled`/`errors`), destination action counts
+  (`linked`/`skipped`/`conflicts`/`errors`/`noops`), and final status
+  (`applied`/`dry-run`/`blocked`).
+- TTY output colorizes successful `LINK`/`CLONE`/`PULL` and applied status
+  green, `SKIP`/`PLAN` and dry-run status yellow/blue, and
+  `ERROR`/`CONFLICT` and blocked status red. Non-TTY output remains plain
+  unless `FORCE_COLOR` is set; `NO_COLOR` disables automatic color.
 
 Safety rules:
 
@@ -245,7 +255,7 @@ Safety rules:
 - If destination is a copied dir with matching source `SKILL.md`, it may be replaced with symlink during adoption.
 - If destination differs, back it up before replacement when adoption mode is enabled.
 
-Phase 3 `--apply` supports only the first two safety cases:
+Phase 3 apply supports only the first two safety cases:
 
 - `already-linked`: skip.
 - `missing`: create the destination symlink.
@@ -340,11 +350,12 @@ Implemented Phase 3 scope:
 - `--repo` is repeatable and accepts configured repo names, configured repo
   URLs, or unconfigured ad-hoc repo URLs.
 - `sync.mode` must be `symlink`.
-- Dry-run is the default behavior.
-- `--apply` creates only missing destination symlinks and skips already-correct
+- Default sync applies changes.
+- `--dry-run` previews without git or destination mutations.
+- `--apply` is accepted for compatibility and creates only missing destination symlinks and skips already-correct
   symlinks.
 - Destination conflicts block apply before any symlink is created.
-- Clone-if-missing and pull-before-sync run only for `sync --apply`; dry-run is
+- Clone-if-missing and pull-before-sync run for default `sync`; dry-run is
   report-only, and `list`, `doctor`, and `config` do not run git.
 
 ### Phase 4 — Adoption / migration mode
@@ -402,7 +413,7 @@ Acceptance:
 ## Open design decisions
 
 1. Should `sync` be dry-run by default forever, or only during beta?
-   - Recommendation: dry-run by default until Ryushe is comfortable, then require `--dry-run` for preview.
+   - Resolved: `sync` applies by default; `--dry-run` is the preview mode.
 
 2. Should default destinations include Ghost/OpenClaw?
    - Recommendation: no for migration; yes only if configured explicitly later.

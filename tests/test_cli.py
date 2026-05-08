@@ -1108,6 +1108,7 @@ sync:
                 "codex",
                 "--repo",
                 repo_url,
+                "--dry-run",
                 env={"XDG_CACHE_HOME": str(cache)},
             )
 
@@ -1135,7 +1136,9 @@ sync:
                 default_destinations=("codex",),
             )
 
-            result = self.run_cli("--config", str(config), "sync", "all")
+            result = self.run_cli(
+                "--config", str(config), "sync", "all", env={"FORCE_COLOR": "0"}
+            )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Repos: local", result.stdout)
@@ -1162,7 +1165,9 @@ sync:
                 default_destinations=("codex", "claude"),
             )
 
-            result = self.run_cli("--config", str(config), "sync", "all", "--dest", "codex")
+            result = self.run_cli(
+                "--config", str(config), "sync", "all", "--dest", "codex", "--dry-run"
+            )
             codex_exists = (codex / "only-skill").exists()
             claude_exists = (claude / "only-skill").exists()
             ghost_exists = (ghost / "only-skill").exists()
@@ -1212,6 +1217,7 @@ sync:
                 str(config),
                 "sync",
                 "all",
+                "--dry-run",
                 env={
                     "PATH": f"{fake_git}:{os.environ['PATH']}",
                     "AISKILLSYNC_FAKE_GIT_LOG": str(log),
@@ -1281,7 +1287,7 @@ sync:
         self.assertIn(f"clone --branch main file:///tmp/fake-remote.git {bridge}", log_text)
         self.assertEqual(target, (bridge / "skills" / "from-clone").resolve())
 
-    def test_sync_apply_creates_only_missing_symlink(self) -> None:
+    def test_sync_applies_by_default_and_creates_only_missing_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             bridge = base / "bridge"
@@ -1299,7 +1305,9 @@ sync:
                 default_destinations=("codex", "claude"),
             )
 
-            result = self.run_cli("--config", str(config), "sync", "all", "--apply")
+            result = self.run_cli(
+                "--config", str(config), "sync", "all", env={"FORCE_COLOR": "0"}
+            )
             codex_link = codex / "sync-me"
             claude_link = claude / "sync-me"
 
@@ -1310,8 +1318,38 @@ sync:
         self.assertIn("LINK codex:sync-me", result.stdout)
         self.assertIn("SKIP claude:sync-me", result.stdout)
         self.assertIn("Created symlinks:", result.stdout)
+        self.assertIn("final status: applied", result.stdout)
+        self.assertNotIn("\x1b[", result.stdout)
         self.assertEqual(codex_target, skill.resolve())
         self.assertEqual(claude_target, skill.resolve())
+
+    def test_sync_blocked_missing_skills_path_prints_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            bridge.mkdir()
+            codex.mkdir()
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex},
+                default_destinations=("codex",),
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all")
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("ERROR repo local: local skills path missing", result.stdout)
+        self.assertIn("Sync summary:", result.stdout)
+        self.assertIn("repo actions: planned=0, cloned=0, pulled=0, errors=1", result.stdout)
+        self.assertIn(
+            "destination actions: linked=0, skipped=0, conflicts=0, errors=0, noops=1",
+            result.stdout,
+        )
+        self.assertIn("final status: blocked", result.stdout)
+        self.assertNotIn("\x1b[", result.stdout)
 
     def test_sync_conflict_blocks_apply_and_creates_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
