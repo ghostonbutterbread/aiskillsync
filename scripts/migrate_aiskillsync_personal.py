@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -29,7 +30,17 @@ STATUS_KEYS = (
 class Bridge:
     key: str
     label: str
-    skills_dir: Path
+    root_path: Path
+    skills_path: str = "skills"
+    repo_url: str | None = None
+    branch: str | None = None
+
+    @property
+    def skills_dir(self) -> Path:
+        skills_path = Path(self.skills_path).expanduser()
+        if skills_path.is_absolute():
+            return skills_path
+        return self.root_path / skills_path
 
 
 @dataclass(frozen=True)
@@ -63,6 +74,7 @@ class DestinationStatus:
 
 @dataclass
 class Report:
+    prepared: list[Action] = field(default_factory=list)
     removed: list[Action] = field(default_factory=list)
     linked: list[Action] = field(default_factory=list)
     skipped: list[Action] = field(default_factory=list)
@@ -92,12 +104,16 @@ BRIDGES = {
     "bounty-harness": Bridge(
         key="bounty-harness",
         label="Bounty Harness",
-        skills_dir=Path("/home/ryushe/projects/bug_bounty_harness/skills"),
+        root_path=Path.home() / "projects" / "bug_bounty_harness",
+        skills_path="skills",
+        repo_url="https://github.com/ghostonbutterbread/bug-bounty-harness.git",
+        branch="master",
     ),
     "bounty-tools": Bridge(
         key="bounty-tools",
         label="Bounty Tools",
-        skills_dir=Path("/home/ryushe/projects/bounty-tools/skills"),
+        root_path=Path.home() / "projects" / "bounty-tools",
+        skills_path="skills",
     ),
 }
 
@@ -105,7 +121,7 @@ DESTINATIONS = {
     "codex": Destination(
         key="codex",
         label="Codex",
-        skills_dir=Path.home() / ".agents" / "skills",
+        skills_dir=Path.home() / ".codex" / "skills",
     ),
     "claude": Destination(
         key="claude",
@@ -175,30 +191,115 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def selected_bridges(keys: list[str] | None, report: Report) -> list[Bridge]:
+def selected_bridges(keys: list[str] | None) -> list[Bridge]:
     if keys:
-        bridges = [BRIDGES[key] for key in keys]
-    else:
-        bridges = [bridge for bridge in BRIDGES.values() if bridge.skills_dir.is_dir()]
-
-    existing = []
-    for bridge in bridges:
-        if bridge.skills_dir.is_dir():
-            existing.append(bridge)
-        else:
-            report.add(
-                "skipped",
-                "source",
-                bridge.key,
-                f"{bridge.label} skills directory does not exist: {bridge.skills_dir}",
-            )
-    return existing
+        return [BRIDGES[key] for key in keys]
+    return list(BRIDGES.values())
 
 
 def selected_destinations(keys: list[str] | None) -> list[Destination]:
     if keys:
         return [DESTINATIONS[key] for key in keys]
     return [DESTINATIONS[key] for key in DEFAULT_DESTINATION_KEYS]
+
+
+def prepare_source_bridges(bridges: list[Bridge], apply: bool, report: Report) -> list[Bridge]:
+    prepared: list[Bridge] = []
+
+    for bridge in bridges:
+        if bridge.skills_dir.is_dir():
+            prepared.append(bridge)
+            continue
+
+        if bridge.root_path.exists():
+            if bridge.root_path.is_dir():
+                report.add(
+                    "skipped",
+                    "source",
+                    bridge.key,
+                    f"{bridge.label} skills directory does not exist: {bridge.skills_dir}",
+                )
+            else:
+                report.add(
+                    "conflicts",
+                    "source",
+                    bridge.key,
+                    f"{bridge.label} root path is not a directory: {bridge.root_path}",
+                )
+            continue
+
+        if bridge.repo_url is None:
+            report.add(
+                "skipped",
+                "source",
+                bridge.key,
+                f"{bridge.label} root path does not exist and no repo URL is configured: "
+                f"{bridge.root_path}",
+            )
+            continue
+
+        report.add("prepared", "source", bridge.key, clone_notice(bridge, apply=apply))
+        if not apply:
+            continue
+
+        error = clone_bridge(bridge)
+        if error is not None:
+            report.add("conflicts", "source", bridge.key, error)
+            report.add(
+                "skipped",
+                "source",
+                bridge.key,
+                f"left any partial checkout untouched: {bridge.root_path}",
+            )
+            continue
+
+        if bridge.skills_dir.is_dir():
+            prepared.append(bridge)
+        else:
+            report.add(
+                "conflicts",
+                "source",
+                bridge.key,
+                f"cloned {bridge.label}, but skills directory does not exist: "
+                f"{bridge.skills_dir}",
+            )
+
+    return prepared
+
+
+def clone_bridge(bridge: Bridge) -> str | None:
+    command = ["git", "clone"]
+    if bridge.branch:
+        command.extend(["--branch", bridge.branch])
+    command.extend([bridge.repo_url or "", str(bridge.root_path)])
+    try:
+        bridge.root_path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        return f"{bridge.label} git clone failed to start: {exc}"
+    if result.returncode != 0:
+        output = command_output(result)
+        return f"{bridge.label} git clone failed with exit {result.returncode}: {output}"
+    return None
+
+
+def clone_notice(bridge: Bridge, apply: bool) -> str:
+    verb = "CLONE" if apply else "PLAN clone"
+    branch = f" --branch {bridge.branch}" if bridge.branch else ""
+    return f"{verb} {bridge.label}: git clone{branch} {bridge.repo_url} {bridge.root_path}"
+
+
+def command_output(result: subprocess.CompletedProcess[str]) -> str:
+    output = "\n".join(
+        item.strip() for item in (result.stdout, result.stderr) if item.strip()
+    )
+    return output or "(no output)"
 
 
 def find_source_skills(bridges: list[Bridge], report: Report) -> dict[str, SkillSource]:
@@ -467,12 +568,14 @@ def print_report(report: Report, dry_run: bool) -> None:
     if report.backup_planned and report.backup_root is not None:
         verb = "planned" if dry_run else "used"
         print(f"backup root {verb}: {report.backup_root}")
+    print(f"prepared: {len(report.prepared)}")
     print(f"removed:   {len(report.removed)}")
     print(f"linked:    {len(report.linked)}")
     print(f"skipped:   {len(report.skipped)}")
     print(f"conflicts: {len(report.conflicts)}")
 
     for title, actions in (
+        ("Source preparation", report.prepared),
         ("Removed", report.removed),
         ("Linked", report.linked),
         ("Skipped", report.skipped),
@@ -488,17 +591,22 @@ def print_report(report: Report, dry_run: bool) -> None:
 def main() -> int:
     args = parse_args()
     report = Report()
-    bridges = selected_bridges(args.bridge, report)
+    requested_bridges = selected_bridges(args.bridge)
+    bridges = prepare_source_bridges(
+        requested_bridges,
+        apply=args.apply and not args.list_sources,
+        report=report,
+    )
     destinations = selected_destinations(args.dest)
 
-    if not bridges:
+    if not bridges and not report.prepared:
         print("No source bridge skills directories were found.", file=sys.stderr)
         print_report(report, dry_run=not args.apply)
         return 1
 
-    sources = find_source_skills(bridges, report)
+    sources = find_source_skills(bridges, report) if bridges else {}
     report.source_skill_count = len(sources)
-    if not sources:
+    if not sources and not (args.list_sources and report.prepared):
         print("No source skills with SKILL.md were found.", file=sys.stderr)
         print_report(report, dry_run=not args.apply)
         return 1

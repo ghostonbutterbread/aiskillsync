@@ -158,6 +158,7 @@ sync:
         self.assertIn("Would write config", result.stdout)
         self.assertIn("bridges:", result.stdout)
         self.assertIn("ai_skill_paths:", result.stdout)
+        self.assertIn("codex: ~/.codex/skills", result.stdout)
 
     def test_init_does_not_overwrite_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

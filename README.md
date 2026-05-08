@@ -86,7 +86,7 @@ bridges:
     enabled: true
 
 ai_skill_paths:
-  codex: ~/.agents/skills
+  codex: ~/.codex/skills
   claude: ~/.claude/skills
   ghost: ~/.openclaw/workspace/skills
 
@@ -185,12 +185,17 @@ python3 -m unittest discover -s tests
 ## Personal migration helper
 
 One-time helper for migrating Ryushe's current copied/symlinked Bounty Harness
-skills into clean symlinks:
+skills into clean symlinks. On a main machine where
+`~/projects/bug_bounty_harness` is missing, the helper reports a planned clone
+during dry-runs and `--list-sources`. Use `--apply` to clone Bounty Harness
+from `https://github.com/ghostonbutterbread/bug-bounty-harness.git` on branch
+`master` before source discovery:
 
 ```bash
 python3 scripts/migrate_aiskillsync_personal.py --list-sources
+python3 scripts/migrate_aiskillsync_personal.py --apply
 python3 scripts/migrate_aiskillsync_personal.py --backup-differs --apply
 ```
 
-By default it processes Codex and Claude skill paths only. Ghost/OpenClaw is
-available explicitly with `--dest ghost`.
+By default it processes `~/.codex/skills` and `~/.claude/skills` only.
+Ghost/OpenClaw remains excluded unless explicitly selected with `--dest ghost`.
