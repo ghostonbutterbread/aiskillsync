@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,9 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync_parser = subparsers.add_parser(
         "sync",
-        help="plan or apply skill symlinks",
+        help="apply or preview skill symlinks",
         description=(
-            "Plan or apply skill symlinks. Preferred syntax is destination-first: "
+            "Apply or preview skill symlinks. Preferred syntax is destination-first: "
             "sync main, sync codex --repo bounty-harness, sync openclaw --repo <url>. "
             "Legacy repo-first selector syntax remains supported with --dest."
         ),
@@ -126,19 +127,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "configured repo name or repo URL to sync; repeat for multiple repos. "
-            "Unconfigured URLs are cloned under repo_dir on apply."
+            "Unconfigured URLs are cloned under repo_dir when applying."
         ),
     )
     mode_group = sync_parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--dry-run",
         action="store_true",
-        help="preview changes without mutating destination paths (default)",
+        help="preview changes without cloning, pulling, or mutating destination paths",
     )
     mode_group.add_argument(
         "--apply",
         action="store_true",
-        help="create only missing destination symlinks",
+        help="apply sync changes (accepted for compatibility; sync applies by default)",
     )
     sync_parser.set_defaults(func=cmd_sync)
 
@@ -441,7 +442,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         return 2
 
     request = _resolve_sync_request(config, args)
-    dry_run = not args.apply
+    dry_run = args.dry_run
     materialization = materialize_repositories_for_sync(
         request.config,
         request.repo_selectors,
@@ -458,16 +459,19 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     _print_sync_plan(plan, stdout)
 
     if plan.has_blockers:
-        print("Apply blocked by errors or conflicts", file=stdout)
+        print(_colorize("Apply blocked by errors or conflicts", "red", stdout), file=stdout)
+        _print_sync_summary(plan, "blocked", stdout)
         return 1
     if dry_run:
-        print("Dry run only; pass --apply to create missing symlinks", file=stdout)
+        print(_colorize("Dry run only; no filesystem changes were made", "blue", stdout), file=stdout)
+        _print_sync_summary(plan, "dry-run", stdout)
         return 0
 
     try:
         created = apply_sync_plan(plan)
     except (OSError, ValueError) as exc:
         print(f"aiskillsync: apply failed: {exc}", file=stderr)
+        _print_sync_summary(plan, "blocked", stdout)
         return 1
     if created:
         print("Created symlinks:", file=stdout)
@@ -475,6 +479,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             print(f"  {item}", file=stdout)
     else:
         print("No symlinks needed", file=stdout)
+    _print_sync_summary(plan, "applied", stdout)
     return 0
 
 
@@ -1089,12 +1094,15 @@ def _print_sync_plan(plan: SyncPlan, stdout: TextIO) -> None:
         file=stdout,
     )
     for notice in plan.notices:
-        print(notice, file=stdout)
+        print(_colorize_notice(notice, stdout), file=stdout)
     for error in plan.errors:
-        print(f"ERROR {error}", file=stdout)
+        print(_colorize(f"ERROR {error}", "red", stdout), file=stdout)
     for name, skills in plan.duplicate_skills.items():
         locations = ", ".join(str(skill.path) for skill in skills)
-        print(f"ERROR duplicate selected skill name {name}: {locations}", file=stdout)
+        print(
+            _colorize(f"ERROR duplicate selected skill name {name}: {locations}", "red", stdout),
+            file=stdout,
+        )
 
     if not plan.actions:
         print("No destination actions", file=stdout)
@@ -1102,17 +1110,130 @@ def _print_sync_plan(plan: SyncPlan, stdout: TextIO) -> None:
 
     print("Destination actions:", file=stdout)
     for action in plan.actions:
-        print(f"  {_format_sync_action(action)}", file=stdout)
+        print(f"  {_format_sync_action(action, stdout, dry_run=plan.dry_run)}", file=stdout)
 
 
-def _format_sync_action(action: SyncAction) -> str:
+def _format_sync_action(
+    action: SyncAction, stdout: TextIO | None = None, *, dry_run: bool = False
+) -> str:
     if action.action == "link":
         verb = "LINK"
+        color = "blue" if dry_run else "green"
     elif action.action == "skip":
         verb = "SKIP"
+        color = "yellow"
     else:
         verb = "CONFLICT"
+        color = "red"
     return (
-        f"{verb} {action.destination}:{action.skill.name} "
+        f"{_colorize(verb, color, stdout)} {action.destination}:{action.skill.name} "
         f"{action.status.label} ({action.status.detail})"
     )
+
+
+def _print_sync_summary(plan: SyncPlan, final_status: str, stdout: TextIO) -> None:
+    repo_counts = _repo_summary_counts(plan)
+    destination_counts = _destination_summary_counts(plan)
+    status_color = {
+        "applied": "green",
+        "dry-run": "blue",
+        "blocked": "red",
+    }.get(final_status, "green")
+
+    print("", file=stdout)
+    print("Sync summary:", file=stdout)
+    print(
+        "  repo actions: "
+        f"planned={repo_counts['planned']}, "
+        f"cloned={repo_counts['cloned']}, "
+        f"pulled={repo_counts['pulled']}, "
+        f"errors={repo_counts['errors']}",
+        file=stdout,
+    )
+    print(
+        "  destination actions: "
+        f"linked={destination_counts['linked']}, "
+        f"skipped={destination_counts['skipped']}, "
+        f"conflicts={destination_counts['conflicts']}, "
+        f"errors={destination_counts['errors']}, "
+        f"noops={destination_counts['noops']}",
+        file=stdout,
+    )
+    print(
+        f"  final status: {_colorize(final_status, status_color, stdout)}",
+        file=stdout,
+    )
+
+
+def _repo_summary_counts(plan: SyncPlan) -> dict[str, int]:
+    return {
+        "planned": sum(1 for notice in plan.notices if notice.startswith("PLAN repo ")),
+        "cloned": sum(1 for notice in plan.notices if notice.startswith("CLONE repo ")),
+        "pulled": sum(1 for notice in plan.notices if notice.startswith("PULL repo ")),
+        "errors": sum(1 for error in plan.errors if _is_repo_error(error))
+        + len(plan.duplicate_skills),
+    }
+
+
+def _destination_summary_counts(plan: SyncPlan) -> dict[str, int]:
+    errors = sum(1 for error in plan.errors if _is_destination_error(error))
+    return {
+        "linked": len(plan.links),
+        "skipped": len(plan.skips),
+        "conflicts": len(plan.conflicts),
+        "errors": errors,
+        "noops": 1 if not plan.actions and errors == 0 else 0,
+    }
+
+
+def _is_repo_error(error: str) -> bool:
+    return (
+        error.startswith("repo ")
+        or error.startswith("repo URL ")
+        or error.startswith("unknown repo selector")
+        or error.startswith("ambiguous repo selector")
+        or error.startswith("repo index ")
+        or error.startswith("selector 'all'")
+    )
+
+
+def _is_destination_error(error: str) -> bool:
+    return (
+        error.startswith("destination ")
+        or error.startswith("selected destinations ")
+        or error.startswith("unknown destination")
+        or error == "no destinations selected"
+    )
+
+
+def _colorize_notice(text: str, stdout: TextIO) -> str:
+    if text.startswith(("CLONE repo ", "PULL repo ")):
+        return _colorize(text, "green", stdout)
+    if text.startswith("PLAN repo "):
+        return _colorize(text, "blue", stdout)
+    return text
+
+
+def _colorize(text: str, color: str, stdout: TextIO | None) -> str:
+    if stdout is None or not _should_color(stdout):
+        return text
+    codes = {
+        "green": "32",
+        "yellow": "33",
+        "blue": "34",
+        "red": "31",
+    }
+    code = codes.get(color)
+    if code is None:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _should_color(stdout: TextIO) -> bool:
+    force = os.environ.get("FORCE_COLOR")
+    if force and force != "0":
+        return True
+    if "NO_COLOR" in os.environ:
+        return False
+    isatty = getattr(stdout, "isatty", None)
+    return bool(isatty and isatty())

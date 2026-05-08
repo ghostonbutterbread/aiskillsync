@@ -50,7 +50,8 @@ aiskillsync sync codex --repo bounty-harness
 aiskillsync sync openclaw --repo https://github.com/ghostonbutterbread/bug-bounty-harness.git
 aiskillsync sync all
 aiskillsync sync bounty-harness --dest codex --dest claude
-aiskillsync sync 1 2 --apply
+aiskillsync sync 1 2
+aiskillsync sync all --dry-run
 ```
 
 You can replace `aiskillsync` with `python3 -m aiskillsync` when running from a
@@ -82,12 +83,13 @@ The current implementation covers Phase 1, Phase 2, and Phase 3 from
 - destination classification
 - repo add/remove config management
 - `list` and `doctor` reporting
-- safe dry-run sync planning
+- safe dry-run sync preview
 - sync-only repo clone/pull materialization
-- optional `sync --apply` creation of missing symlinks only
+- default `sync` creation of missing symlinks only
 
-`sync` is dry-run by default. `--apply` is intentionally narrow in Phase 3: it
-may first clone missing selected enabled repo roots when `repo` exists
+`sync` applies by default. The compatibility `--apply` flag is accepted but no
+longer required. Apply is intentionally narrow in Phase 3: it may first clone
+missing selected enabled repo roots when `repo` exists
 and `sync.clone_if_missing` is true, or pull existing selected enabled git
 repo roots when `sync.pull_before_sync` is true. It then creates destination
 symlinks that are missing. Existing correct symlinks are skipped, and existing
@@ -160,7 +162,7 @@ names, still affects the exit status.
 Add a repo URL to the config. If no local location is given, aiskillsync uses
 `repo_dir/<repo-name>`; by default `repo_dir` is
 `~/.config/aiskillsync/repos`. This updates config only; the repo is cloned on
-the next `sync --apply` when selected.
+the next `sync` when selected, unless `--dry-run` is used.
 
 ```bash
 aiskillsync add https://github.com/org/ai-skills.git
@@ -223,12 +225,20 @@ Ghost/OpenClaw is not touched unless it is explicitly selected with
 
 Only `sync.mode: symlink` is supported. Dry-run never runs git and never
 mutates repo or destination paths; it reports planned `PLAN` clone and pull
-steps. `--apply` may run `git clone`, including `--branch <branch>` when a
-repo branch is configured, for missing selected enabled repo roots with a
+steps. Normal `sync` may run `git clone`, including `--branch <branch>` when
+a repo branch is configured, for missing selected enabled repo roots with a
 repo URL and `sync.clone_if_missing: true`. For existing selected enabled repo
-roots with `sync.pull_before_sync: true`, `--apply` requires the path to be a
-git repo and runs `git -C <path> pull --ff-only`; any non-zero pull blocks the
-sync before symlink creation. Disabled repos are never cloned or pulled.
+roots with `sync.pull_before_sync: true`, normal `sync` requires the path to
+be a git repo and runs `git -C <path> pull --ff-only`; any non-zero pull
+blocks the sync before symlink creation. Disabled repos are never cloned or
+pulled.
+
+Sync output ends with a concise summary of repo actions, destination actions,
+and final status (`applied`, `dry-run`, or `blocked`). Terminal output colors
+successful `LINK`/`CLONE`/`PULL` and applied status green, `SKIP`/`PLAN` and
+dry-run status yellow/blue, and `ERROR`/`CONFLICT` and blocked status red.
+Captured non-TTY output stays plain unless color is forced with `FORCE_COLOR`;
+set `NO_COLOR` to disable automatic color.
 
 ## Verification
 
