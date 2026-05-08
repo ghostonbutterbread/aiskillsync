@@ -23,7 +23,7 @@ DEFAULT_CONFIG_TEXT = """bridges:
     enabled: true
 
 ai_skill_paths:
-  codex: ~/.agents/skills
+  codex: ~/.codex/skills
   claude: ~/.claude/skills
   ghost: ~/.openclaw/workspace/skills
 
