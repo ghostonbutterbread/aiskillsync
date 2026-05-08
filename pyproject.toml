@@ -12,7 +12,6 @@ dependencies = []
 
 [project.scripts]
 aiskillsync = "aiskillsync.cli:main"
-aiskillsync-migrate-personal = "scripts.migrate_aiskillsync_personal:main"
 
 [tool.setuptools]
-packages = ["aiskillsync", "scripts"]
+packages = ["aiskillsync"]
