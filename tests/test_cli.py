@@ -1407,6 +1407,114 @@ sync:
         )
         self.assertIn(f"PULL repo private-tools: git -C {bridge} pull --ff-only", result.stdout)
 
+
+    def test_sync_pull_does_not_warn_when_github_auth_is_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "needs-pull")
+            (bridge / ".git").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            parser = cli_module.build_parser()
+            args = parser.parse_args(["--config", str(config), "sync", "all"])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "GH_TOKEN": "",
+                    "GITHUB_TOKEN": "",
+                    "GITHUB_ENTERPRISE_TOKEN": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(cli_module, "_github_auth_configured", return_value=True):
+                    result = cli_module.cmd_sync(args, stdout, stderr)
+
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertNotIn("GitHub auth not detected", stdout.getvalue())
+        self.assertIn(f"PULL repo private-tools: git -C {bridge} pull --ff-only", stdout.getvalue())
+
+    def test_sync_pull_uses_local_ssh_remote_for_github_auth_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "needs-pull")
+            (bridge / ".git").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            parser = cli_module.build_parser()
+            args = parser.parse_args(["--config", str(config), "sync", "all"])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {"PATH": f"{fake_git}:{os.environ['PATH']}"},
+                clear=False,
+            ):
+                with mock.patch.object(
+                    cli_module, "_git_origin_url", return_value="git@github.com:example/private-tools.git"
+                ), mock.patch.object(
+                    cli_module, "_github_ssh_auth_configured", return_value=True
+                ) as ssh_auth, mock.patch.object(
+                    cli_module, "_github_auth_configured", return_value=False
+                ) as gh_auth:
+                    result = cli_module.cmd_sync(args, stdout, stderr)
+
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertNotIn("GitHub auth not detected", stdout.getvalue())
+        ssh_auth.assert_called_once_with("github.com")
+        gh_auth.assert_not_called()
+        self.assertIn(f"PULL repo private-tools: git -C {bridge} pull --ff-only", stdout.getvalue())
+
     def test_sync_interactive_github_prompt_can_skip_clone(self) -> None:
         class TtyInput(io.StringIO):
             def isatty(self) -> bool:
