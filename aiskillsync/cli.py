@@ -567,15 +567,17 @@ def _sync_repo_preflight(
             continue
 
         auth_url = _repo_auth_url(bridge, action)
+        if not _repo_url_uses_ssh(auth_url):
+            continue
+
         host = _github_repo_host(auth_url)
         if host is None:
             continue
 
-        auth_key = _github_auth_cache_key(auth_url, host)
-        authenticated = auth_by_host.get(auth_key)
+        authenticated = auth_by_host.get(host)
         if authenticated is None:
-            authenticated = _github_auth_configured_for_url(auth_url, host)
-            auth_by_host[auth_key] = authenticated
+            authenticated = _github_ssh_auth_configured(host)
+            auth_by_host[host] = authenticated
         if authenticated:
             continue
 
@@ -1035,40 +1037,11 @@ def _git_origin_url(path: Path) -> str | None:
     return remote or None
 
 
-def _github_auth_cache_key(repo_url: str, host: str) -> str:
-    protocol = "ssh" if _repo_url_uses_ssh(repo_url) else "https"
-    return f"{protocol}://{host}"
-
-
-def _github_auth_configured_for_url(repo_url: str, host: str) -> bool:
-    if _repo_url_uses_ssh(repo_url):
-        return _github_ssh_auth_configured(host)
-    return _github_auth_configured(host)
-
-
 def _repo_url_uses_ssh(repo_url: str) -> bool:
     parsed = urlparse(repo_url)
     if parsed.scheme in {"ssh", "git+ssh"}:
         return True
     return "://" not in repo_url and "@" in repo_url and ":" in repo_url
-
-
-def _github_auth_configured(host: str) -> bool:
-    if any(
-        os.environ.get(name)
-        for name in ("GH_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
-    ):
-        return True
-    try:
-        result = subprocess.run(
-            ["gh", "auth", "status", "--hostname", host],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError:
-        return False
-    return result.returncode == 0
 
 
 def _github_ssh_auth_configured(host: str) -> bool:
