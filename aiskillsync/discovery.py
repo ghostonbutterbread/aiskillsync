@@ -56,8 +56,6 @@ class DoctorReport:
                     return True
                 if discovery.exists and discovery.missing_skill_md:
                     return True
-                if not discovery.exists and discovery.root_exists:
-                    return True
                 if not discovery.root_exists and not discovery.bridge.repo:
                     return True
         return False

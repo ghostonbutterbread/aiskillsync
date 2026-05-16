@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
+from urllib.parse import urlparse
 
 from .config import BridgeConfig, Config
 from .discovery import (
@@ -61,6 +63,7 @@ class SyncPlan:
 class RepositoryMaterialization:
     notices: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+    skipped_missing_roots: tuple[str, ...] = ()
 
     @property
     def has_errors(self) -> bool:
@@ -72,6 +75,8 @@ def materialize_repositories_for_sync(
     selectors: tuple[str, ...],
     *,
     dry_run: bool,
+    skip_clone_bridges: frozenset[str] = frozenset(),
+    skip_pull_bridges: frozenset[str] = frozenset(),
 ) -> RepositoryMaterialization:
     """Clone or update selected enabled repos for sync only."""
 
@@ -81,6 +86,7 @@ def materialize_repositories_for_sync(
 
     notices: list[str] = []
     errors: list[str] = []
+    skipped_missing_roots: list[str] = []
     for bridge in selected:
         if not bridge.enabled:
             continue
@@ -88,6 +94,12 @@ def materialize_repositories_for_sync(
         root_exists = bridge.path.exists()
         if not root_exists:
             if bridge.repo and config.sync.clone_if_missing:
+                if bridge.name in skip_clone_bridges:
+                    notices.append(
+                        f"SKIP repo {bridge.name}: clone skipped because GitHub auth was not confirmed"
+                    )
+                    skipped_missing_roots.append(bridge.name)
+                    continue
                 notices.append(_clone_notice(bridge, dry_run=dry_run))
                 if not dry_run:
                     error = _clone_bridge(bridge)
@@ -100,6 +112,11 @@ def materialize_repositories_for_sync(
             continue
 
         if config.sync.pull_before_sync:
+            if bridge.name in skip_pull_bridges:
+                notices.append(
+                    f"SKIP repo {bridge.name}: pull skipped because GitHub auth was not confirmed"
+                )
+                continue
             notices.append(_pull_notice(bridge, dry_run=dry_run))
             if dry_run:
                 continue
@@ -112,7 +129,11 @@ def materialize_repositories_for_sync(
             if error is not None:
                 errors.append(error)
 
-    return RepositoryMaterialization(notices=tuple(notices), errors=tuple(errors))
+    return RepositoryMaterialization(
+        notices=tuple(notices),
+        errors=tuple(errors),
+        skipped_missing_roots=tuple(skipped_missing_roots),
+    )
 
 
 def build_sync_plan(
@@ -123,6 +144,7 @@ def build_sync_plan(
     dry_run: bool,
     preflight_notices: tuple[str, ...] = (),
     preflight_errors: tuple[str, ...] = (),
+    skipped_missing_repos: tuple[str, ...] = (),
 ) -> SyncPlan:
     """Build a sync plan without mutating local repos or destination paths."""
 
@@ -132,6 +154,7 @@ def build_sync_plan(
     errors = [*selection_errors, *destination_errors]
     errors.extend(preflight_errors)
     notices: list[str] = [*preflight_notices]
+    skipped_missing_repo_names = set(skipped_missing_repos)
     selected_skills: list[Skill] = []
 
     for discovery in selected:
@@ -140,6 +163,8 @@ def build_sync_plan(
             notices.append(f"SKIP repo {bridge.name}: disabled")
             continue
         if not discovery.root_exists:
+            if bridge.name in skipped_missing_repo_names:
+                continue
             if bridge.repo and config.sync.clone_if_missing:
                 if not dry_run:
                     errors.append(
@@ -154,8 +179,8 @@ def build_sync_plan(
             errors.append(f"repo {bridge.name}: local path is not a directory: {bridge.path}")
             continue
         if not discovery.exists:
-            errors.append(
-                f"repo {bridge.name}: local skills path missing: {discovery.skills_dir}"
+            notices.append(
+                f"SKIP repo {bridge.name}: local skills path missing: {discovery.skills_dir}"
             )
             continue
         if discovery.missing_skill_md:
@@ -451,7 +476,10 @@ def _is_git_repo_root(path: Path) -> bool:
 def _clone_notice(bridge: BridgeConfig, *, dry_run: bool) -> str:
     verb = "PLAN" if dry_run else "CLONE"
     branch = f" --branch {bridge.branch}" if bridge.branch else ""
-    return f"{verb} repo {bridge.name}: git clone{branch} {bridge.repo} {bridge.path}"
+    return (
+        f"{verb} repo {bridge.name}: git clone{branch} "
+        f"{_redact_repo_url(bridge.repo or '')} {bridge.path}"
+    )
 
 
 def _pull_notice(bridge: BridgeConfig, *, dry_run: bool) -> str:
@@ -463,4 +491,22 @@ def _command_output(result: subprocess.CompletedProcess[str]) -> str:
     text = (result.stderr or result.stdout or "").strip()
     if not text:
         return "no output"
-    return text.splitlines()[0]
+    return _redact_url_credentials(text.splitlines()[0])
+
+
+def _redact_repo_url(value: str) -> str:
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    if parsed.username is None and parsed.password is None:
+        return value
+
+    hostname = parsed.hostname or ""
+    netloc = hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return parsed._replace(netloc=netloc).geturl()
+
+
+def _redact_url_credentials(text: str) -> str:
+    return re.sub(r"([a-z][a-z0-9+.-]*://)[^/\s@]+@", r"\1", text, flags=re.IGNORECASE)

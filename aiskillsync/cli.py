@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,7 @@ from .sync import (
     apply_sync_plan,
     build_sync_plan,
     materialize_repositories_for_sync,
+    select_bridge_configs,
 )
 
 
@@ -56,6 +58,14 @@ class SyncRequest:
     destinations: tuple[str, ...]
     notices: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SyncRepoPreflight:
+    notices: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    skip_clone_bridges: tuple[str, ...] = ()
+    skip_pull_bridges: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -443,18 +453,28 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
     request = _resolve_sync_request(config, args)
     dry_run = args.dry_run
+    repo_preflight = _sync_repo_preflight(
+        request.config,
+        request.repo_selectors,
+        dry_run=dry_run,
+        stdin=sys.stdin,
+        stdout=stdout,
+    )
     materialization = materialize_repositories_for_sync(
         request.config,
         request.repo_selectors,
         dry_run=dry_run,
+        skip_clone_bridges=frozenset(repo_preflight.skip_clone_bridges),
+        skip_pull_bridges=frozenset(repo_preflight.skip_pull_bridges),
     )
     plan = build_sync_plan(
         request.config,
         request.repo_selectors,
         request.destinations,
         dry_run=dry_run,
-        preflight_notices=(*request.notices, *materialization.notices),
-        preflight_errors=(*request.errors, *materialization.errors),
+        preflight_notices=(*request.notices, *repo_preflight.notices, *materialization.notices),
+        preflight_errors=(*request.errors, *repo_preflight.errors, *materialization.errors),
+        skipped_missing_repos=materialization.skipped_missing_roots,
     )
     _print_sync_plan(plan, stdout)
 
@@ -516,6 +536,67 @@ def _resolve_sync_request(config: Config, args: argparse.Namespace) -> SyncReque
 
     repo_selectors = (*repo_options, *terms) or ("all",)
     return _with_adhoc_repositories(config, repo_selectors, ())
+
+
+def _sync_repo_preflight(
+    config: Config,
+    selectors: tuple[str, ...],
+    *,
+    dry_run: bool,
+    stdin: TextIO,
+    stdout: TextIO,
+) -> SyncRepoPreflight:
+    if dry_run:
+        return SyncRepoPreflight()
+
+    selected, selection_errors = select_bridge_configs(config.bridges, selectors)
+    if selection_errors:
+        return SyncRepoPreflight()
+
+    notices: list[str] = []
+    skip_clone_bridges: list[str] = []
+    skip_pull_bridges: list[str] = []
+    auth_by_host: dict[str, bool] = {}
+
+    for bridge in selected:
+        if not bridge.enabled or bridge.repo is None:
+            continue
+
+        action = _repo_git_sync_action(config, bridge)
+        if action is None:
+            continue
+
+        host = _github_repo_host(bridge.repo)
+        if host is None:
+            continue
+
+        authenticated = auth_by_host.get(host)
+        if authenticated is None:
+            authenticated = _github_auth_configured(host)
+            auth_by_host[host] = authenticated
+        if authenticated:
+            continue
+
+        if _interactive_prompt_available(stdin, stdout):
+            if _confirm_github_sync_continue(bridge.name, host, action, stdin, stdout):
+                notices.append(
+                    f"WARN repo {bridge.name}: GitHub auth not detected for {host} before {action}; continuing by user choice"
+                )
+            elif action == "clone":
+                skip_clone_bridges.append(bridge.name)
+            else:
+                skip_pull_bridges.append(bridge.name)
+            continue
+
+        notices.append(
+            f"WARN repo {bridge.name}: GitHub auth not detected for {host} before {action}; non-interactive mode will continue"
+        )
+
+    return SyncRepoPreflight(
+        notices=tuple(notices),
+        skip_clone_bridges=tuple(skip_clone_bridges),
+        skip_pull_bridges=tuple(skip_pull_bridges),
+    )
 
 
 def _expand_destination_groups(config: Config, groups: tuple[str, ...]) -> tuple[str, ...]:
@@ -900,6 +981,76 @@ def _configured_repo_by_path(config: Config, path: Path) -> BridgeConfig | None:
     return None
 
 
+def _repo_git_sync_action(config: Config, bridge: BridgeConfig) -> str | None:
+    root_exists = bridge.path.exists()
+    if not root_exists:
+        if bridge.repo and config.sync.clone_if_missing:
+            return "clone"
+        return None
+    if not bridge.path.is_dir():
+        return None
+    if config.sync.pull_before_sync:
+        return "pull"
+    return None
+
+
+def _github_repo_host(repo_url: str) -> str | None:
+    parsed = urlparse(repo_url)
+    host = parsed.hostname
+    if host is None and "://" not in repo_url and "@" in repo_url and ":" in repo_url:
+        host = repo_url.rsplit("@", 1)[1].split(":", 1)[0]
+    if host is None:
+        return None
+    host = host.lower()
+    if host == "github.com" or host.startswith("github."):
+        return host
+    return None
+
+
+def _github_auth_configured(host: str) -> bool:
+    if any(
+        os.environ.get(name)
+        for name in ("GH_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+    ):
+        return True
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "status", "--hostname", host],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _interactive_prompt_available(stdin: TextIO, stdout: TextIO) -> bool:
+    stdin_isatty = getattr(stdin, "isatty", None)
+    stdout_isatty = getattr(stdout, "isatty", None)
+    return bool(stdin_isatty and stdin_isatty() and stdout_isatty and stdout_isatty())
+
+
+def _confirm_github_sync_continue(
+    repo_name: str,
+    host: str,
+    action: str,
+    stdin: TextIO,
+    stdout: TextIO,
+) -> bool:
+    prompt = (
+        f"GitHub auth not detected for repo {repo_name} on {host} before {action}. "
+        "Continue anyway? [Y/n] "
+    )
+    print(prompt, end="", file=stdout, flush=True)
+    answer = stdin.readline()
+    if not answer:
+        print("", file=stdout)
+        return True
+    print("", file=stdout)
+    return answer.strip().lower() not in {"n", "no"}
+
+
 def _repo_add_conflicts(config: Config, repo: BridgeConfig) -> tuple[str, ...]:
     errors: list[str] = []
     if any(bridge.name == repo.name for bridge in config.bridges):
@@ -1042,7 +1193,7 @@ def _print_bridge_checks(discoveries: tuple[BridgeDiscovery, ...], stdout: TextI
             print(f"OK {prefix} local skills path exists: {discovery.skills_dir}", file=stdout)
         else:
             print(
-                f"FAIL {prefix} local skills path missing under existing repo root: "
+                f"WARN {prefix} local skills path missing under existing repo root: "
                 f"{discovery.skills_dir}",
                 file=stdout,
             )
