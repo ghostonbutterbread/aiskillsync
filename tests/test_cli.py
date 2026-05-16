@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
+from aiskillsync import cli as cli_module
 from aiskillsync.config import DEFAULT_CONFIG_TEXT
 
 
@@ -81,6 +84,17 @@ sys.exit(9)
             encoding="utf-8",
         )
         git.chmod(0o755)
+        gh = bin_dir / "gh"
+        gh.write_text(
+            """#!/usr/bin/env python3
+import os
+import sys
+
+sys.exit(int(os.environ.get("AISKILLSYNC_FAKE_GH_AUTH_EXIT", "1")))
+""",
+            encoding="utf-8",
+        )
+        gh.chmod(0o755)
         return bin_dir
 
     def write_config(self, path: Path, bridge: Path, codex: Path, claude: Path) -> None:
@@ -843,7 +857,7 @@ sync:
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("FAIL duplicate skill name shared", result.stdout)
 
-    def test_doctor_fails_when_skills_path_missing_under_existing_root(self) -> None:
+    def test_doctor_warns_when_skills_path_missing_under_existing_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             bridge = base / "bridge"
@@ -871,8 +885,8 @@ sync:
 
             result = self.run_cli("--config", str(config), "doctor")
 
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("FAIL repo local-bridge: local skills path missing", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("WARN repo local-bridge: local skills path missing", result.stdout)
         self.assertNotIn("repo is cloneable", result.stdout)
 
     def test_doctor_skips_disabled_bridge_skill_dir_failures(self) -> None:
@@ -1287,6 +1301,186 @@ sync:
         self.assertIn(f"clone --branch main file:///tmp/fake-remote.git {bridge}", log_text)
         self.assertEqual(target, (bridge / "skills" / "from-clone").resolve())
 
+    def test_sync_noninteractive_warns_before_github_clone_without_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            bridge = base / "clone-target"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://ghp_secret_token@github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_CLONE_SKILL": "private-skill",
+                    "GH_TOKEN": "",
+                    "GITHUB_TOKEN": "",
+                    "GITHUB_ENTERPRISE_TOKEN": "",
+                },
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "WARN repo private-tools: GitHub auth not detected for github.com before clone; non-interactive mode will continue",
+            result.stdout,
+        )
+        self.assertIn(
+            "CLONE repo private-tools: git clone https://github.com/example/private-tools.git",
+            result.stdout,
+        )
+        self.assertNotIn("ghp_secret_token", result.stdout)
+
+    def test_sync_noninteractive_warns_before_github_pull_without_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "needs-pull")
+            (bridge / ".git").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "GH_TOKEN": "",
+                    "GITHUB_TOKEN": "",
+                    "GITHUB_ENTERPRISE_TOKEN": "",
+                },
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "WARN repo private-tools: GitHub auth not detected for github.com before pull; non-interactive mode will continue",
+            result.stdout,
+        )
+        self.assertIn(f"PULL repo private-tools: git -C {bridge} pull --ff-only", result.stdout)
+
+    def test_sync_interactive_github_prompt_can_skip_clone(self) -> None:
+        class TtyInput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        class TtyOutput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            bridge = base / "clone-target"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            parser = cli_module.build_parser()
+            args = parser.parse_args(["--config", str(config), "sync", "all"])
+            stdout = TtyOutput()
+            stderr = io.StringIO()
+            stdin = TtyInput("n\n")
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "FORCE_COLOR": "0",
+                    "NO_COLOR": "1",
+                    "GH_TOKEN": "",
+                    "GITHUB_TOKEN": "",
+                    "GITHUB_ENTERPRISE_TOKEN": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(sys, "stdin", stdin):
+                    result = cli_module.cmd_sync(args, stdout, stderr)
+
+            log_text = log.read_text(encoding="utf-8") if log.exists() else ""
+
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertIn(
+            "GitHub auth not detected for repo private-tools on github.com before clone. Continue anyway? [Y/n]",
+            stdout.getvalue(),
+        )
+        self.assertIn(
+            "SKIP repo private-tools: clone skipped because GitHub auth was not confirmed",
+            stdout.getvalue(),
+        )
+        self.assertIn("No destination actions", stdout.getvalue())
+        self.assertIn("final status: applied", stdout.getvalue())
+        self.assertEqual(log_text, "")
+
     def test_sync_applies_by_default_and_creates_only_missing_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1323,33 +1517,56 @@ sync:
         self.assertEqual(codex_target, skill.resolve())
         self.assertEqual(claude_target, skill.resolve())
 
-    def test_sync_blocked_missing_skills_path_prints_summary(self) -> None:
+    def test_sync_missing_skills_path_skips_repo_and_applies_others(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            bridge = base / "bridge"
+            missing_bridge = base / "missing-bridge"
+            ready_bridge = base / "ready-bridge"
             codex = base / "codex"
-            bridge.mkdir()
+            missing_bridge.mkdir()
             codex.mkdir()
             config = base / "config.yaml"
-            self.write_phase3_config(
-                config,
-                [("local", bridge)],
-                {"codex": codex},
-                default_destinations=("codex",),
+            self.write_skill(ready_bridge / "skills", "ready-skill")
+            config.write_text(
+                f"""bridges:
+  - name: missing
+    path: {missing_bridge}
+    skills_path: skills
+    enabled: true
+  - name: ready
+    path: {ready_bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
             )
 
             result = self.run_cli("--config", str(config), "sync", "all")
+            link = codex / "ready-skill"
+            target = link.resolve() if link.is_symlink() else None
 
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("ERROR repo local: local skills path missing", result.stdout)
-        self.assertIn("Sync summary:", result.stdout)
-        self.assertIn("repo actions: planned=0, cloned=0, pulled=0, errors=1", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(
-            "destination actions: linked=0, skipped=0, conflicts=0, errors=0, noops=1",
+            f"SKIP repo missing: local skills path missing: {missing_bridge / 'skills'}",
             result.stdout,
         )
-        self.assertIn("final status: blocked", result.stdout)
+        self.assertIn("LINK codex:ready-skill", result.stdout)
+        self.assertIn("Created symlinks:", result.stdout)
+        self.assertIn("Sync summary:", result.stdout)
+        self.assertIn("repo actions: planned=0, cloned=0, pulled=0, errors=0", result.stdout)
+        self.assertIn("final status: applied", result.stdout)
         self.assertNotIn("\x1b[", result.stdout)
+        self.assertEqual(target, (ready_bridge / "skills" / "ready-skill").resolve())
 
     def test_sync_conflict_blocks_apply_and_creates_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
