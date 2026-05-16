@@ -1301,7 +1301,7 @@ sync:
         self.assertIn(f"clone --branch main file:///tmp/fake-remote.git {bridge}", log_text)
         self.assertEqual(target, (bridge / "skills" / "from-clone").resolve())
 
-    def test_sync_noninteractive_warns_before_github_clone_without_auth(self) -> None:
+    def test_sync_https_clone_does_not_run_auth_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             fake_git = self.write_fake_git(base)
@@ -1346,17 +1346,14 @@ sync:
             )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(
-            "WARN repo private-tools: GitHub auth not detected for github.com before clone; non-interactive mode will continue",
-            result.stdout,
-        )
+        self.assertNotIn("GitHub auth not detected", result.stdout)
         self.assertIn(
             "CLONE repo private-tools: git clone https://github.com/example/private-tools.git",
             result.stdout,
         )
         self.assertNotIn("ghp_secret_token", result.stdout)
 
-    def test_sync_noninteractive_warns_before_github_pull_without_auth(self) -> None:
+    def test_sync_https_pull_does_not_run_auth_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             fake_git = self.write_fake_git(base)
@@ -1401,27 +1398,22 @@ sync:
             )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(
-            "WARN repo private-tools: GitHub auth not detected for github.com before pull; non-interactive mode will continue",
-            result.stdout,
-        )
+        self.assertNotIn("GitHub auth not detected", result.stdout)
         self.assertIn(f"PULL repo private-tools: git -C {bridge} pull --ff-only", result.stdout)
 
 
-    def test_sync_pull_does_not_warn_when_github_auth_is_detected(self) -> None:
+    def test_sync_noninteractive_warns_before_github_ssh_clone_without_auth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             fake_git = self.write_fake_git(base)
-            bridge = base / "bridge"
+            bridge = base / "clone-target"
             codex = base / "codex"
             codex.mkdir()
-            self.write_skill(bridge / "skills", "needs-pull")
-            (bridge / ".git").mkdir()
             config = base / "config.yaml"
             config.write_text(
                 f"""bridges:
   - name: private-tools
-    repo: https://github.com/example/private-tools.git
+    repo: git@github.com:example/private-tools.git
     path: {bridge}
     skills_path: skills
     enabled: true
@@ -1431,8 +1423,8 @@ ai_skill_paths:
 
 sync:
   mode: symlink
-  pull_before_sync: true
-  clone_if_missing: false
+  pull_before_sync: false
+  clone_if_missing: true
   default_destinations:
     - codex
 """,
@@ -1447,18 +1439,20 @@ sync:
                 os.environ,
                 {
                     "PATH": f"{fake_git}:{os.environ['PATH']}",
-                    "GH_TOKEN": "",
-                    "GITHUB_TOKEN": "",
-                    "GITHUB_ENTERPRISE_TOKEN": "",
+                    "AISKILLSYNC_FAKE_GIT_CLONE_SKILL": "private-skill",
                 },
                 clear=False,
             ):
-                with mock.patch.object(cli_module, "_github_auth_configured", return_value=True):
+                with mock.patch.object(cli_module, "_github_ssh_auth_configured", return_value=False):
                     result = cli_module.cmd_sync(args, stdout, stderr)
 
         self.assertEqual(result, 0, stderr.getvalue())
-        self.assertNotIn("GitHub auth not detected", stdout.getvalue())
-        self.assertIn(f"PULL repo private-tools: git -C {bridge} pull --ff-only", stdout.getvalue())
+        self.assertIn(
+            "WARN repo private-tools: GitHub auth not detected for github.com before clone; non-interactive mode will continue",
+            stdout.getvalue(),
+        )
+        self.assertIn("CLONE repo private-tools: git clone git@github.com:example/private-tools.git", stdout.getvalue())
+
 
     def test_sync_pull_uses_local_ssh_remote_for_github_auth_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1504,15 +1498,12 @@ sync:
                     cli_module, "_git_origin_url", return_value="git@github.com:example/private-tools.git"
                 ), mock.patch.object(
                     cli_module, "_github_ssh_auth_configured", return_value=True
-                ) as ssh_auth, mock.patch.object(
-                    cli_module, "_github_auth_configured", return_value=False
-                ) as gh_auth:
+                ) as ssh_auth:
                     result = cli_module.cmd_sync(args, stdout, stderr)
 
         self.assertEqual(result, 0, stderr.getvalue())
         self.assertNotIn("GitHub auth not detected", stdout.getvalue())
         ssh_auth.assert_called_once_with("github.com")
-        gh_auth.assert_not_called()
         self.assertIn(f"PULL repo private-tools: git -C {bridge} pull --ff-only", stdout.getvalue())
 
     def test_sync_interactive_github_prompt_can_skip_clone(self) -> None:
@@ -1535,7 +1526,7 @@ sync:
             config.write_text(
                 f"""bridges:
   - name: private-tools
-    repo: https://github.com/example/private-tools.git
+    repo: git@github.com:example/private-tools.git
     path: {bridge}
     skills_path: skills
     enabled: true
