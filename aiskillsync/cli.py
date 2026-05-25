@@ -43,6 +43,7 @@ from .sync import (
     SyncPlan,
     apply_sync_plan,
     build_sync_plan,
+    make_backup_root,
     materialize_repositories_for_sync,
     select_bridge_configs,
 )
@@ -138,6 +139,33 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "configured repo name or repo URL to sync; repeat for multiple repos. "
             "Unconfigured URLs are cloned under repo_dir when applying."
+        ),
+    )
+    sync_parser.add_argument(
+        "--skill",
+        action="append",
+        default=[],
+        help="only sync/adopt this skill name; repeat for multiple skills",
+    )
+    sync_parser.add_argument(
+        "--exclude-skill",
+        action="append",
+        default=[],
+        help="skip this skill name during sync/adoption; repeat for multiple skills",
+    )
+    sync_parser.add_argument(
+        "--denylist",
+        action="append",
+        type=Path,
+        default=[],
+        help="file of skill names to skip during sync/adoption; comments and blank lines ignored",
+    )
+    sync_parser.add_argument(
+        "--adopt",
+        action="store_true",
+        help=(
+            "opt-in migration mode: back up existing same-name destination entries "
+            "and replace them with symlinks to the selected repo skills"
         ),
     )
     mode_group = sync_parser.add_mutually_exclusive_group()
@@ -293,6 +321,11 @@ def cmd_config(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     print(
         "  default_destinations: "
         + (", ".join(config.sync.default_destinations) if config.sync.default_destinations else "-"),
+        file=stdout,
+    )
+    print(
+        "  migration_denylist: "
+        + (", ".join(config.sync.migration_denylist) if config.sync.migration_denylist else "-"),
         file=stdout,
     )
     return 0
@@ -453,6 +486,8 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
     request = _resolve_sync_request(config, args)
     dry_run = args.dry_run
+    denylist, denylist_errors = _sync_denylist(config, args)
+    backup_root = make_backup_root() if args.adopt else None
     repo_preflight = _sync_repo_preflight(
         request.config,
         request.repo_selectors,
@@ -472,9 +507,18 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         request.repo_selectors,
         request.destinations,
         dry_run=dry_run,
+        adopt=args.adopt,
+        include_skills=tuple(args.skill),
+        exclude_skills=denylist,
         preflight_notices=(*request.notices, *repo_preflight.notices, *materialization.notices),
-        preflight_errors=(*request.errors, *repo_preflight.errors, *materialization.errors),
+        preflight_errors=(
+            *request.errors,
+            *denylist_errors,
+            *repo_preflight.errors,
+            *materialization.errors,
+        ),
         skipped_missing_repos=materialization.skipped_missing_roots,
+        backup_root=backup_root,
     )
     _print_sync_plan(plan, stdout)
 
@@ -497,6 +541,8 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         print("Created symlinks:", file=stdout)
         for item in created:
             print(f"  {item}", file=stdout)
+        if plan.backup_root is not None and plan.adoptions:
+            print(f"Backups written to: {plan.backup_root}", file=stdout)
     else:
         print("No symlinks needed", file=stdout)
     _print_sync_summary(plan, "applied", stdout)
@@ -505,6 +551,33 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
 def _load_config(args: argparse.Namespace) -> Config:
     return load_config(args.config)
+
+
+def _sync_denylist(
+    config: Config, args: argparse.Namespace
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    names: list[str] = [*args.exclude_skill]
+    if args.adopt:
+        names.extend(config.sync.migration_denylist)
+    errors: list[str] = []
+    for path in args.denylist:
+        try:
+            names.extend(_read_skill_denylist(path))
+        except OSError as exc:
+            errors.append(f"could not read denylist {path}: {exc}")
+    return tuple(dict.fromkeys(names)), tuple(errors)
+
+
+def _read_skill_denylist(path: Path) -> tuple[str, ...]:
+    names: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        name = stripped.split("#", 1)[0].strip()
+        if name:
+            names.append(name)
+    return tuple(names)
 
 
 def _resolve_sync_request(config: Config, args: argparse.Namespace) -> SyncRequest:
@@ -1297,6 +1370,9 @@ def _print_sync_plan(plan: SyncPlan, stdout: TextIO) -> None:
             _colorize(f"ERROR duplicate selected skill name {name}: {locations}", "red", stdout),
             file=stdout,
         )
+    if plan.backup_root is not None and plan.adoptions:
+        verb = "PLAN backup root" if plan.dry_run else "BACKUP root"
+        print(_colorize(f"{verb}: {plan.backup_root}", "blue", stdout), file=stdout)
 
     if not plan.actions:
         print("No destination actions", file=stdout)
@@ -1312,6 +1388,9 @@ def _format_sync_action(
 ) -> str:
     if action.action == "link":
         verb = "LINK"
+        color = "blue" if dry_run else "green"
+    elif action.action == "adopt":
+        verb = "ADOPT"
         color = "blue" if dry_run else "green"
     elif action.action == "skip":
         verb = "SKIP"
@@ -1347,6 +1426,7 @@ def _print_sync_summary(plan: SyncPlan, final_status: str, stdout: TextIO) -> No
     print(
         "  destination actions: "
         f"linked={destination_counts['linked']}, "
+        f"adopted={destination_counts['adopted']}, "
         f"skipped={destination_counts['skipped']}, "
         f"conflicts={destination_counts['conflicts']}, "
         f"errors={destination_counts['errors']}, "
@@ -1373,6 +1453,7 @@ def _destination_summary_counts(plan: SyncPlan) -> dict[str, int]:
     errors = sum(1 for error in plan.errors if _is_destination_error(error))
     return {
         "linked": len(plan.links),
+        "adopted": len(plan.adoptions),
         "skipped": len(plan.skips),
         "conflicts": len(plan.conflicts),
         "errors": errors,

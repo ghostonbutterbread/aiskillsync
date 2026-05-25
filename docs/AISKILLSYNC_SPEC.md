@@ -255,15 +255,41 @@ Safety rules:
 - If destination is a copied dir with matching source `SKILL.md`, it may be replaced with symlink during adoption.
 - If destination differs, back it up before replacement when adoption mode is enabled.
 
-Phase 3 apply supports only the first two safety cases:
+Normal sync supports only the first two safety cases:
 
 - `already-linked`: skip.
 - `missing`: create the destination symlink.
 - `directory-copy`, `unexpected-symlink`, and `path-conflict`: report a
   conflict and block the whole apply.
 
-Phase 3 does not delete, adopt, back up, replace, or otherwise modify existing
-destination entries.
+Normal sync does not delete, adopt, back up, replace, or otherwise modify
+existing destination entries.
+
+First-class adoption is available only through explicit migration flags:
+
+```bash
+aiskillsync sync codex --repo bounty-harness --skill xss --adopt --dry-run
+aiskillsync sync main --repo bounty-harness --skill xss --adopt
+```
+
+Adoption behavior:
+
+- `--adopt` turns same-name destination conflicts into adoption actions.
+- Existing destination entries are moved under
+  `~/.cache/aiskillsync-migration/<timestamp>/<destination>/<skill>/` before the
+  symlink is created.
+- `--dry-run --adopt` reports the planned backup root and adoption actions but
+  does not move or link anything.
+- `--skill` limits the operation to selected skill names and should be preferred
+  for intentional migrations.
+- `--exclude-skill` and `--denylist <file>` skip local-only/private/experimental
+  skills.
+- `sync.migration_denylist` provides a persistent config-level denylist.
+
+Adoption is not the default workflow. New skills should be created in the
+owning repo and synced as focused new skills. Adoption is for intentionally
+promoting useful legacy provider skills into repo-owned global skills, or for
+replacing known legacy provider copies with repo-owned symlinks.
 
 ## Migration helper
 
@@ -362,7 +388,9 @@ Implemented Phase 3 scope:
 
 Deliverables:
 
-- `--adopt` or `--backup-differs`
+- `--adopt`
+- `--skill`, `--exclude-skill`, `--denylist`
+- `sync.migration_denylist`
 - stable backup root per run
 - health report
 - migrated personal helper logic folded into sync engine
@@ -372,6 +400,7 @@ Acceptance:
 - Existing copied Bounty Harness skills are backed up and replaced by symlinks.
 - Conflicting or unrelated entries remain untouched.
 - Health report lists removed/backed-up/linked/skipped/conflicts.
+- Migration remains opt-in only; normal sync continues to block on conflicts.
 
 ### Phase 5 — Compatibility shims
 

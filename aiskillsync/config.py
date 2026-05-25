@@ -38,6 +38,7 @@ sync:
   default_destinations:
     - codex
     - claude
+  migration_denylist: []
 """
 
 
@@ -68,6 +69,7 @@ class SyncConfig:
     pull_before_sync: bool = True
     clone_if_missing: bool = True
     default_destinations: tuple[str, ...] = ("codex", "claude")
+    migration_denylist: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -204,6 +206,11 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         isinstance(item, str) and item for item in default_destinations_raw
     ):
         raise ConfigError("sync.default_destinations must be a list of destination names")
+    migration_denylist_raw = sync_raw.get("migration_denylist", ())
+    if not isinstance(migration_denylist_raw, (list, tuple)) or not all(
+        isinstance(item, str) and item for item in migration_denylist_raw
+    ):
+        raise ConfigError("sync.migration_denylist must be a list of skill names")
 
     mode = sync_raw.get("mode", "symlink")
     if not isinstance(mode, str) or not mode:
@@ -225,6 +232,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             pull_before_sync=pull_before_sync,
             clone_if_missing=clone_if_missing,
             default_destinations=tuple(default_destinations_raw),
+            migration_denylist=tuple(migration_denylist_raw),
         ),
     )
 
@@ -261,6 +269,10 @@ def config_to_text(config: Config) -> str:
     lines.append("  default_destinations:")
     for destination in config.sync.default_destinations:
         lines.append(f"    - {_format_scalar(destination)}")
+    if config.sync.migration_denylist:
+        lines.append("  migration_denylist:")
+        for skill_name in config.sync.migration_denylist:
+            lines.append(f"    - {_format_scalar(skill_name)}")
     lines.append("")
     return "\n".join(lines)
 
