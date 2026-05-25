@@ -1693,6 +1693,164 @@ sync:
         self.assertIn("Apply blocked", result.stdout)
         self.assertFalse(claude_exists)
 
+    def test_sync_adopt_backs_up_existing_directory_and_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            home.mkdir()
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            source = self.write_skill(bridge / "skills", "legacy", "repo-owned")
+            old = codex / "legacy"
+            old.mkdir()
+            (old / "SKILL.md").write_text("legacy-copy", encoding="utf-8")
+            (old / "local-note.md").write_text("keep me", encoding="utf-8")
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex},
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "codex",
+                "--repo",
+                "local",
+                "--skill",
+                "legacy",
+                "--adopt",
+                env={"HOME": str(home)},
+            )
+            link = codex / "legacy"
+            target = link.resolve() if link.is_symlink() else None
+            backups = list((home / ".cache" / "aiskillsync-migration").glob("*/codex/legacy"))
+            backup_note = backups[0] / "local-note.md" if backups else None
+            backup_note_exists = backup_note is not None and backup_note.is_file()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ADOPT codex:legacy", result.stdout)
+        self.assertIn("Backups written to:", result.stdout)
+        self.assertEqual(target, source.resolve())
+        self.assertEqual(len(backups), 1)
+        self.assertTrue(backup_note_exists)
+
+    def test_sync_adopt_dry_run_does_not_mutate_existing_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            home.mkdir()
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "legacy", "repo-owned")
+            old = codex / "legacy"
+            old.mkdir()
+            (old / "SKILL.md").write_text("legacy-copy", encoding="utf-8")
+            config = base / "config.yaml"
+            self.write_phase3_config(config, [("local", bridge)], {"codex": codex})
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "codex",
+                "--repo",
+                "local",
+                "--skill",
+                "legacy",
+                "--adopt",
+                "--dry-run",
+                env={"HOME": str(home)},
+            )
+            old_is_dir = old.is_dir()
+            old_is_link = old.is_symlink()
+            backups_root_exists = (home / ".cache" / "aiskillsync-migration").exists()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PLAN backup root:", result.stdout)
+        self.assertIn("ADOPT codex:legacy", result.stdout)
+        self.assertTrue(old_is_dir)
+        self.assertFalse(old_is_link)
+        self.assertFalse(backups_root_exists)
+
+    def test_sync_skill_filter_and_denylist_keep_migration_focused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "migrate-me")
+            self.write_skill(bridge / "skills", "never-migrate")
+            (codex / "migrate-me").mkdir()
+            (codex / "never-migrate").mkdir()
+            denylist = base / "denylist.txt"
+            denylist.write_text("# local-only skills\nnever-migrate\n", encoding="utf-8")
+            config = base / "config.yaml"
+            self.write_phase3_config(config, [("local", bridge)], {"codex": codex})
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "codex",
+                "--repo",
+                "local",
+                "--adopt",
+                "--denylist",
+                str(denylist),
+                "--dry-run",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ADOPT codex:migrate-me", result.stdout)
+        self.assertNotIn("codex:never-migrate", result.stdout)
+        self.assertIn("SKIP migration denylist: never-migrate", result.stdout)
+
+    def test_sync_config_migration_denylist_is_honored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "local-only")
+            (codex / "local-only").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: local
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations:
+    - codex
+  migration_denylist:
+    - local-only
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config", str(config), "sync", "codex", "--repo", "local", "--adopt"
+            )
+            destination_is_dir = (codex / "local-only").is_dir()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SKIP migration denylist: local-only", result.stdout)
+        self.assertNotIn("codex:local-only", result.stdout)
+        self.assertTrue(destination_is_dir)
+
     def test_sync_duplicate_destination_roots_block_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

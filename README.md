@@ -52,6 +52,7 @@ aiskillsync sync all
 aiskillsync sync bounty-harness --dest codex --dest claude
 aiskillsync sync 1 2
 aiskillsync sync all --dry-run
+aiskillsync sync codex --repo bounty-harness --skill xss --adopt --dry-run
 ```
 
 You can replace `aiskillsync` with `python3 -m aiskillsync` when running from a
@@ -75,7 +76,8 @@ It will not overwrite an existing config unless `--force` is passed.
 Use `config --default` or `config --show-default` to preview the default
 template without creating or loading a config.
 
-The current implementation covers Phase 1, Phase 2, and Phase 3 from
+The current implementation covers Phase 1, Phase 2, Phase 3, and the first
+explicit-adoption slice of Phase 4 from
 `docs/AISKILLSYNC_SPEC.md`:
 
 - config loading with `~` and environment variable path expansion
@@ -86,6 +88,7 @@ The current implementation covers Phase 1, Phase 2, and Phase 3 from
 - safe dry-run sync preview
 - sync-only repo clone/pull materialization
 - default `sync` creation of missing symlinks only
+- opt-in `sync --adopt` migration with backups, skill filters, and denylists
 
 `sync` applies by default. The compatibility `--apply` flag is accepted but no
 longer required. Apply is intentionally narrow in Phase 3: it may first clone
@@ -95,7 +98,12 @@ repo roots when `sync.pull_before_sync` is true. It then creates destination
 symlinks that are missing. Existing correct symlinks are skipped, and existing
 directories, files, or symlinks to unexpected targets are conflicts that block
 the whole apply. It does not delete, adopt, back up, or replace existing
-entries; those behaviors are reserved for Phase 4.
+entries unless `--adopt` is explicitly passed.
+
+`--adopt` is migration mode, not normal sync. It backs up same-name destination
+entries under `~/.cache/aiskillsync-migration/<timestamp>/...` and replaces
+them with symlinks to selected repo skills. Prefer pairing it with
+`--skill <name>` or a denylist so migrations stay focused.
 
 `add` and `remove` are exposed as repo-first convenience commands and mirror
 `repo add` / `repo remove`.
@@ -133,6 +141,8 @@ sync:
   default_destinations:
     - codex
     - claude
+  migration_denylist:
+    - local-private-skill
 ```
 
 The MVP parser supports the simple YAML shape above and intentionally avoids
@@ -219,6 +229,35 @@ aiskillsync sync 1 2
 aiskillsync sync bounty-harness --dest codex --dest claude
 ```
 
+Focused skill filters:
+
+```bash
+aiskillsync sync codex --repo bounty-harness --skill xss
+aiskillsync sync main --repo bounty-harness --skill xss --skill bypass
+```
+
+Opt-in migration/adoption:
+
+```bash
+aiskillsync sync codex --repo bounty-harness --skill xss --adopt --dry-run
+aiskillsync sync codex --repo bounty-harness --skill xss --adopt
+```
+
+During adoption, `directory-copy`, `unexpected-symlink`, and same-name path
+conflicts are moved to a timestamped backup root before the canonical symlink
+is created. Without `--adopt`, those entries remain conflicts and block apply.
+
+Migration denylists:
+
+```bash
+aiskillsync sync main --repo bounty-harness --adopt --exclude-skill local-private-skill
+aiskillsync sync main --repo bounty-harness --adopt --denylist ./migration-denylist.txt
+```
+
+`--denylist` files are newline-delimited skill names. Blank lines and `#`
+comments are ignored. The config-level `sync.migration_denylist` is always
+honored.
+
 Ghost/OpenClaw is not touched unless it is explicitly selected with
 `sync ghost`, `sync openclaw`, `--dest ghost`, `--dest openclaw`, `sync all
 --repo ...`, or included in `sync.default_destinations`.
@@ -248,10 +287,13 @@ Targeted stdlib smoke tests:
 python3 -m unittest discover -s tests
 ```
 
-## Personal migration helper
+## Legacy personal migration helper
 
-One-time helper for migrating Ryushe's current copied/symlinked Bounty Harness
-skills into clean symlinks. On a main machine where
+The old one-time helper remains for compatibility, but new work should prefer
+first-class `aiskillsync sync --adopt`.
+
+The helper migrates Ryushe's current copied/symlinked Bounty Harness skills
+into clean symlinks. On a main machine where
 `~/projects/bug_bounty_harness` is missing, the helper reports a planned clone
 during dry-runs and `--list-sources`. Use `--apply` to clone Bounty Harness
 from `https://github.com/ghostonbutterbread/bug-bounty-harness.git` on branch

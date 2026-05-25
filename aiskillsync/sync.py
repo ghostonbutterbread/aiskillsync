@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import subprocess
+import shutil
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 import re
 from urllib.parse import urlparse
@@ -35,11 +37,13 @@ class SyncAction:
 @dataclass(frozen=True)
 class SyncPlan:
     dry_run: bool
+    adopt: bool
     destinations: tuple[str, ...]
     selected_discoveries: tuple[BridgeDiscovery, ...]
     actions: tuple[SyncAction, ...] = ()
     notices: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+    backup_root: Path | None = None
     duplicate_skills: dict[str, tuple[Skill, ...]] = field(default_factory=dict)
 
     @property
@@ -53,6 +57,10 @@ class SyncPlan:
     @property
     def links(self) -> tuple[SyncAction, ...]:
         return tuple(action for action in self.actions if action.action == "link")
+
+    @property
+    def adoptions(self) -> tuple[SyncAction, ...]:
+        return tuple(action for action in self.actions if action.action == "adopt")
 
     @property
     def skips(self) -> tuple[SyncAction, ...]:
@@ -142,9 +150,13 @@ def build_sync_plan(
     destination_names: tuple[str, ...],
     *,
     dry_run: bool,
+    adopt: bool = False,
+    include_skills: tuple[str, ...] = (),
+    exclude_skills: tuple[str, ...] = (),
     preflight_notices: tuple[str, ...] = (),
     preflight_errors: tuple[str, ...] = (),
     skipped_missing_repos: tuple[str, ...] = (),
+    backup_root: Path | None = None,
 ) -> SyncPlan:
     """Build a sync plan without mutating local repos or destination paths."""
 
@@ -155,6 +167,8 @@ def build_sync_plan(
     errors.extend(preflight_errors)
     notices: list[str] = [*preflight_notices]
     skipped_missing_repo_names = set(skipped_missing_repos)
+    include_skill_names = set(include_skills)
+    exclude_skill_names = set(exclude_skills)
     selected_skills: list[Skill] = []
 
     for discovery in selected:
@@ -189,7 +203,24 @@ def build_sync_plan(
                 f"{len(discovery.missing_skill_md)}"
             )
             continue
-        selected_skills.extend(discovery.skills)
+        selected_skills.extend(
+            skill
+            for skill in discovery.skills
+            if (not include_skill_names or skill.name in include_skill_names)
+            and skill.name not in exclude_skill_names
+        )
+
+    selected_names = {skill.name for skill in selected_skills}
+    missing_includes = include_skill_names - selected_names
+    if missing_includes:
+        errors.append(
+            "selected skill names not found in selected repos: "
+            + ", ".join(sorted(missing_includes))
+        )
+    if exclude_skill_names:
+        notices.append(
+            "SKIP migration denylist: " + ", ".join(sorted(exclude_skill_names))
+        )
 
     duplicate_skills = duplicate_skill_names(tuple(selected_skills))
     errors.extend(duplicate_destination_root_errors(config, destinations))
@@ -209,6 +240,8 @@ def build_sync_plan(
                     action = "skip"
                 elif status.key in MUTABLE_STATUSES:
                     action = "link"
+                elif status.key in CONFLICT_STATUSES and adopt:
+                    action = "adopt"
                 elif status.key in CONFLICT_STATUSES:
                     action = "conflict"
                 else:
@@ -225,11 +258,13 @@ def build_sync_plan(
 
     return SyncPlan(
         dry_run=dry_run,
+        adopt=adopt,
         destinations=destinations,
         selected_discoveries=selected,
         actions=tuple(actions),
         notices=tuple(notices),
         errors=tuple(errors),
+        backup_root=backup_root,
         duplicate_skills=duplicate_skills,
     )
 
@@ -343,14 +378,16 @@ def _normalize_repo_url(value: str) -> str:
 
 
 def apply_sync_plan(plan: SyncPlan) -> tuple[str, ...]:
-    """Create only missing destination symlinks from an already validated plan."""
+    """Create missing symlinks and, when requested, adopt existing entries."""
 
     if plan.has_blockers:
         raise ValueError("cannot apply a sync plan with blockers")
+    if plan.adoptions and plan.backup_root is None:
+        raise ValueError("adoption requires a backup root")
 
     created: list[str] = []
     seen_action_paths: dict[Path, SyncAction] = {}
-    for action in plan.links:
+    for action in (*plan.links, *plan.adoptions):
         action_path = _canonical_path(action.status.path)
         previous = seen_action_paths.get(action_path)
         if previous is not None:
@@ -360,7 +397,7 @@ def apply_sync_plan(plan: SyncPlan) -> tuple[str, ...]:
                 f"{action.destination}:{action.skill.name} -> {action_path}"
             )
         seen_action_paths[action_path] = action
-    for dest_root in {action.destination_root for action in plan.links}:
+    for dest_root in {action.destination_root for action in (*plan.links, *plan.adoptions)}:
         conflict = destination_root_conflict(dest_root)
         if conflict is not None:
             raise ValueError(conflict)
@@ -371,11 +408,37 @@ def apply_sync_plan(plan: SyncPlan) -> tuple[str, ...]:
                 f"destination changed before apply: {action.destination}:{action.skill.name} "
                 f"is now {current.label}"
             )
+    for action in plan.adoptions:
+        current = classify_destination(action.destination_root, action.skill)
+        if current.key not in CONFLICT_STATUSES:
+            raise ValueError(
+                f"destination changed before adoption: {action.destination}:{action.skill.name} "
+                f"is now {current.label}"
+            )
+    for action in plan.adoptions:
+        backup_path = _backup_path(plan.backup_root, action)
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(action.status.path), str(backup_path))
     for action in plan.links:
         action.destination_root.mkdir(parents=True, exist_ok=True)
         action.status.path.symlink_to(action.skill.path, target_is_directory=True)
         created.append(f"{action.destination}:{action.skill.name}")
+    for action in plan.adoptions:
+        action.destination_root.mkdir(parents=True, exist_ok=True)
+        action.status.path.symlink_to(action.skill.path, target_is_directory=True)
+        created.append(f"{action.destination}:{action.skill.name}")
     return tuple(created)
+
+
+def make_backup_root() -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    return Path.home() / ".cache" / "aiskillsync-migration" / timestamp
+
+
+def _backup_path(backup_root: Path | None, action: SyncAction) -> Path:
+    if backup_root is None:
+        raise ValueError("backup root is required")
+    return backup_root / action.destination / action.skill.name
 
 
 def duplicate_destination_root_errors(
