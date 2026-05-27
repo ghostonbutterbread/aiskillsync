@@ -1733,7 +1733,7 @@ sync:
             )
 
             quiet = self.run_cli("--config", str(config), "sync", "all")
-            verbose = self.run_cli("--config", str(config), "sync", "all", "--verbose")
+            verbose = self.run_cli("--config", str(config), "sync", "all", "-v")
 
         self.assertEqual(quiet.returncode, 0, quiet.stdout + quiet.stderr)
         self.assertIn(
@@ -1746,6 +1746,39 @@ sync:
         self.assertEqual(verbose.returncode, 0, verbose.stdout + verbose.stderr)
         self.assertIn("SKIP codex:already-linked", verbose.stdout)
         self.assertIn("SKIP claude:already-linked", verbose.stdout)
+        self.assertNotIn("File diffs", verbose.stdout)
+
+    def test_sync_double_verbose_shows_file_diffs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            source_skill = self.write_skill(bridge / "skills", "copy-skill", "new body\n")
+            copied_skill = codex / "copy-skill"
+            copied_skill.mkdir()
+            (copied_skill / "SKILL.md").write_text("old body\n", encoding="utf-8")
+            config = base / "config.yaml"
+            self.write_phase3_config(config, [("local", bridge)], {"codex": codex})
+
+            quiet = self.run_cli("--config", str(config), "sync", "all")
+            single_verbose = self.run_cli("--config", str(config), "sync", "all", "-v")
+            double_verbose = self.run_cli("--config", str(config), "sync", "all", "-vv")
+
+        self.assertEqual(quiet.returncode, 1, quiet.stdout + quiet.stderr)
+        self.assertIn("CONFLICT codex:copy-skill", quiet.stdout)
+        self.assertNotIn("File diffs:", quiet.stdout)
+
+        self.assertEqual(single_verbose.returncode, 1, single_verbose.stdout + single_verbose.stderr)
+        self.assertIn("CONFLICT codex:copy-skill", single_verbose.stdout)
+        self.assertNotIn("File diffs:", single_verbose.stdout)
+
+        self.assertEqual(double_verbose.returncode, 1, double_verbose.stdout + double_verbose.stderr)
+        self.assertIn("File diffs:", double_verbose.stdout)
+        self.assertIn(str(source_skill / "SKILL.md"), double_verbose.stdout)
+        self.assertIn(str(copied_skill / "SKILL.md"), double_verbose.stdout)
+        self.assertIn("-new body", double_verbose.stdout)
+        self.assertIn("+old body", double_verbose.stdout)
 
     def test_sync_missing_skills_path_skips_repo_and_applies_others(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
