@@ -1705,12 +1705,47 @@ sync:
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("LINK codex:sync-me", result.stdout)
-        self.assertIn("SKIP claude:sync-me", result.stdout)
+        self.assertNotIn("SKIP claude:sync-me", result.stdout)
+        self.assertIn("1 skipped hidden; use --verbose to show no-ops", result.stdout)
         self.assertIn("Created symlinks:", result.stdout)
         self.assertIn("final status: applied", result.stdout)
         self.assertNotIn("\x1b[", result.stdout)
         self.assertEqual(codex_target, skill.resolve())
         self.assertEqual(claude_target, skill.resolve())
+
+    def test_sync_verbose_shows_skipped_destination_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            claude = base / "claude"
+            codex.mkdir()
+            claude.mkdir()
+            skill = self.write_skill(bridge / "skills", "already-linked")
+            (codex / "already-linked").symlink_to(skill, target_is_directory=True)
+            (claude / "already-linked").symlink_to(skill, target_is_directory=True)
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("local", bridge)],
+                {"codex": codex, "claude": claude},
+                default_destinations=("codex", "claude"),
+            )
+
+            quiet = self.run_cli("--config", str(config), "sync", "all")
+            verbose = self.run_cli("--config", str(config), "sync", "all", "--verbose")
+
+        self.assertEqual(quiet.returncode, 0, quiet.stdout + quiet.stderr)
+        self.assertIn(
+            "No destination actions to show (2 skipped; use --verbose to show no-ops)",
+            quiet.stdout,
+        )
+        self.assertNotIn("SKIP codex:already-linked", quiet.stdout)
+        self.assertIn("skipped=2", quiet.stdout)
+
+        self.assertEqual(verbose.returncode, 0, verbose.stdout + verbose.stderr)
+        self.assertIn("SKIP codex:already-linked", verbose.stdout)
+        self.assertIn("SKIP claude:already-linked", verbose.stdout)
 
     def test_sync_missing_skills_path_skips_repo_and_applies_others(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
