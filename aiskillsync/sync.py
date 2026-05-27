@@ -78,6 +78,12 @@ class RepositoryMaterialization:
         return bool(self.errors)
 
 
+@dataclass(frozen=True)
+class PullResult:
+    error: str | None = None
+    updated: bool = False
+
+
 def materialize_repositories_for_sync(
     config: Config,
     selectors: tuple[str, ...],
@@ -133,9 +139,15 @@ def materialize_repositories_for_sync(
                     f"repo {bridge.name}: pull_before_sync requires a git repo: {bridge.path}"
                 )
                 continue
-            error = _pull_bridge(bridge)
-            if error is not None:
-                errors.append(error)
+            result = _pull_bridge(bridge)
+            if result.error is not None:
+                errors.append(result.error)
+            elif result.updated:
+                notices.append(
+                    f"UPDATED repo {bridge.name}: pulled new source changes; linked skills now use the updated files"
+                )
+            else:
+                notices.append(f"UNCHANGED repo {bridge.name}: already up to date")
 
     return RepositoryMaterialization(
         notices=tuple(notices),
@@ -500,7 +512,7 @@ def _clone_bridge(bridge: BridgeConfig) -> str | None:
     return None
 
 
-def _pull_bridge(bridge: BridgeConfig) -> str | None:
+def _pull_bridge(bridge: BridgeConfig) -> PullResult:
     command = ["git", "-C", str(bridge.path), "pull", "--ff-only"]
     try:
         result = subprocess.run(
@@ -511,13 +523,28 @@ def _pull_bridge(bridge: BridgeConfig) -> str | None:
             check=False,
         )
     except OSError as exc:
-        return f"repo {bridge.name}: git pull --ff-only failed to start: {exc}"
+        return PullResult(error=f"repo {bridge.name}: git pull --ff-only failed to start: {exc}")
     if result.returncode != 0:
-        return (
-            f"repo {bridge.name}: git pull --ff-only failed with exit "
-            f"{result.returncode}: {_command_output(result)}"
+        return PullResult(
+            error=(
+                f"repo {bridge.name}: git pull --ff-only failed with exit "
+                f"{result.returncode}: {_command_output(result)}"
+            )
         )
-    return None
+    return PullResult(updated=_pull_output_indicates_update(result))
+
+
+def _pull_output_indicates_update(result: subprocess.CompletedProcess[str]) -> bool:
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    unchanged_markers = (
+        "already up to date",
+        "already up-to-date",
+        "up to date.",
+        "up-to-date.",
+    )
+    if any(marker in output for marker in unchanged_markers):
+        return False
+    return bool(output.strip())
 
 
 def _is_git_repo_root(path: Path) -> bool:
