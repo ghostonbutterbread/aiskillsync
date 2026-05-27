@@ -168,6 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
             "and replace them with symlinks to the selected repo skills"
         ),
     )
+    sync_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show no-op destination actions such as already-linked skipped skills",
+    )
     mode_group = sync_parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--dry-run",
@@ -520,7 +525,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         skipped_missing_repos=materialization.skipped_missing_roots,
         backup_root=backup_root,
     )
-    _print_sync_plan(plan, stdout)
+    _print_sync_plan(plan, stdout, verbose=args.verbose)
 
     if plan.has_blockers:
         print(_colorize("Apply blocked by errors or conflicts", "red", stdout), file=stdout)
@@ -1348,7 +1353,7 @@ def _print_destination_classification(
             print(f"  {skill.name}: {status.label} ({status.detail})", file=stdout)
 
 
-def _print_sync_plan(plan: SyncPlan, stdout: TextIO) -> None:
+def _print_sync_plan(plan: SyncPlan, stdout: TextIO, *, verbose: bool = False) -> None:
     mode = "dry-run" if plan.dry_run else "apply"
     print(f"Sync plan ({mode})", file=stdout)
     if plan.selected_discoveries:
@@ -1374,13 +1379,34 @@ def _print_sync_plan(plan: SyncPlan, stdout: TextIO) -> None:
         verb = "PLAN backup root" if plan.dry_run else "BACKUP root"
         print(_colorize(f"{verb}: {plan.backup_root}", "blue", stdout), file=stdout)
 
+    visible_actions = _visible_sync_actions(plan, verbose=verbose)
+    hidden_skips = len(plan.actions) - len(visible_actions)
+
     if not plan.actions:
         print("No destination actions", file=stdout)
         return
 
-    print("Destination actions:", file=stdout)
-    for action in plan.actions:
+    if not visible_actions:
+        print(
+            f"No destination actions to show ({hidden_skips} skipped; use --verbose to show no-ops)",
+            file=stdout,
+        )
+        return
+
+    suffix = (
+        f" ({hidden_skips} skipped hidden; use --verbose to show no-ops)"
+        if hidden_skips
+        else ""
+    )
+    print(f"Destination actions:{suffix}", file=stdout)
+    for action in visible_actions:
         print(f"  {_format_sync_action(action, stdout, dry_run=plan.dry_run)}", file=stdout)
+
+
+def _visible_sync_actions(plan: SyncPlan, *, verbose: bool) -> tuple[SyncAction, ...]:
+    if verbose:
+        return plan.actions
+    return tuple(action for action in plan.actions if action.action != "skip")
 
 
 def _format_sync_action(
