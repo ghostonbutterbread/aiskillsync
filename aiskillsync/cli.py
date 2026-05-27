@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import os
 import subprocess
@@ -169,9 +170,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sync_parser.add_argument(
+        "-v",
         "--verbose",
-        action="store_true",
-        help="show no-op destination actions such as already-linked skipped skills",
+        action="count",
+        default=0,
+        help=(
+            "increase sync output detail; -v shows skipped/no-op destination actions, "
+            "-vv also shows file diffs for comparable skill directories"
+        ),
     )
     mode_group = sync_parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -525,7 +531,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         skipped_missing_repos=materialization.skipped_missing_roots,
         backup_root=backup_root,
     )
-    _print_sync_plan(plan, stdout, verbose=args.verbose)
+    _print_sync_plan(plan, stdout, verbosity=args.verbose)
 
     if plan.has_blockers:
         print(_colorize("Apply blocked by errors or conflicts", "red", stdout), file=stdout)
@@ -1353,7 +1359,7 @@ def _print_destination_classification(
             print(f"  {skill.name}: {status.label} ({status.detail})", file=stdout)
 
 
-def _print_sync_plan(plan: SyncPlan, stdout: TextIO, *, verbose: bool = False) -> None:
+def _print_sync_plan(plan: SyncPlan, stdout: TextIO, *, verbosity: int = 0) -> None:
     mode = "dry-run" if plan.dry_run else "apply"
     print(f"Sync plan ({mode})", file=stdout)
     if plan.selected_discoveries:
@@ -1379,7 +1385,7 @@ def _print_sync_plan(plan: SyncPlan, stdout: TextIO, *, verbose: bool = False) -
         verb = "PLAN backup root" if plan.dry_run else "BACKUP root"
         print(_colorize(f"{verb}: {plan.backup_root}", "blue", stdout), file=stdout)
 
-    visible_actions = _visible_sync_actions(plan, verbose=verbose)
+    visible_actions = _visible_sync_actions(plan, verbosity=verbosity)
     hidden_skips = len(plan.actions) - len(visible_actions)
 
     if not plan.actions:
@@ -1402,11 +1408,96 @@ def _print_sync_plan(plan: SyncPlan, stdout: TextIO, *, verbose: bool = False) -
     for action in visible_actions:
         print(f"  {_format_sync_action(action, stdout, dry_run=plan.dry_run)}", file=stdout)
 
+    if verbosity >= 2:
+        _print_sync_diffs(plan, stdout)
 
-def _visible_sync_actions(plan: SyncPlan, *, verbose: bool) -> tuple[SyncAction, ...]:
-    if verbose:
+
+def _visible_sync_actions(plan: SyncPlan, *, verbosity: int) -> tuple[SyncAction, ...]:
+    if verbosity >= 1:
         return plan.actions
     return tuple(action for action in plan.actions if action.action != "skip")
+
+
+def _print_sync_diffs(plan: SyncPlan, stdout: TextIO) -> None:
+    diffs = tuple(_iter_sync_diffs(plan))
+    if not diffs:
+        print("File diffs: none", file=stdout)
+        return
+
+    print("File diffs:", file=stdout)
+    for line in diffs:
+        print(line, file=stdout)
+
+
+def _iter_sync_diffs(plan: SyncPlan) -> tuple[str, ...]:
+    lines: list[str] = []
+    for action in plan.actions:
+        destination_path = _diffable_destination_path(action)
+        if destination_path is None:
+            continue
+        diff = _skill_directory_diff(action.skill.path, destination_path)
+        if not diff:
+            continue
+        lines.append(f"--- {action.destination}:{action.skill.name}")
+        lines.extend(diff)
+    return tuple(lines)
+
+
+def _diffable_destination_path(action: SyncAction) -> Path | None:
+    path = action.status.path
+    if path.is_symlink():
+        resolved = path.resolve()
+        return resolved if resolved.is_dir() else None
+    if path.is_dir():
+        return path
+    return None
+
+
+def _skill_directory_diff(source: Path, destination: Path) -> tuple[str, ...]:
+    source_files = _relative_text_file_paths(source)
+    destination_files = _relative_text_file_paths(destination)
+    diff_lines: list[str] = []
+    for relative in sorted(source_files | destination_files):
+        source_file = source / relative
+        destination_file = destination / relative
+        source_text = _read_text_for_diff(source_file)
+        destination_text = _read_text_for_diff(destination_file)
+        if source_text == destination_text:
+            continue
+        if source_text is None or destination_text is None:
+            diff_lines.append(f"Binary or unreadable file differs: {relative}")
+            continue
+        diff_lines.extend(
+            difflib.unified_diff(
+                source_text.splitlines(),
+                destination_text.splitlines(),
+                fromfile=str(source_file),
+                tofile=str(destination_file),
+                lineterm="",
+            )
+        )
+    return tuple(diff_lines)
+
+
+def _relative_text_file_paths(root: Path) -> set[Path]:
+    if not root.is_dir():
+        return set()
+    return {
+        path.relative_to(root)
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def _read_text_for_diff(path: Path) -> str | None:
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return None
+    except OSError:
+        return None
 
 
 def _format_sync_action(
