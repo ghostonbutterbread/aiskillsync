@@ -72,6 +72,9 @@ if len(args) == 4 and args[0] == "-C" and args[2:] == ["pull", "--ff-only"]:
     exit_code = int(os.environ.get("AISKILLSYNC_FAKE_GIT_PULL_EXIT", "0"))
     if exit_code:
         print("fake pull failed", file=sys.stderr)
+    pull_output = os.environ.get("AISKILLSYNC_FAKE_GIT_PULL_OUTPUT")
+    if pull_output:
+        print(pull_output)
     sys.exit(exit_code)
 
 if len(args) == 4 and args[0] == "-C" and args[2:] == ["rev-parse", "--is-inside-work-tree"]:
@@ -1400,6 +1403,99 @@ sync:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("GitHub auth not detected", result.stdout)
         self.assertIn(f"PULL repo private-tools: git -C {bridge} pull --ff-only", result.stdout)
+
+    def test_sync_reports_pulled_skill_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "needs-pull")
+            (bridge / ".git").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_PULL_OUTPUT": "Fast-forward",
+                },
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "UPDATED repo private-tools: pulled new source changes; linked skills now use the updated files",
+            result.stdout,
+        )
+
+    def test_sync_reports_unchanged_pulled_repos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "needs-pull")
+            (bridge / ".git").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_PULL_OUTPUT": "Already up to date.",
+                },
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("UNCHANGED repo private-tools: already up to date", result.stdout)
 
 
     def test_sync_noninteractive_warns_before_github_ssh_clone_without_auth(self) -> None:
