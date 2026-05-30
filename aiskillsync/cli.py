@@ -51,6 +51,9 @@ from .sync import (
 
 
 DESTINATION_GROUPS = ("main", "codex", "claude", "ghost", "openclaw", "all")
+ROOT_CONTEXT_DESTINATIONS = {"codex": "CODEX.md", "claude": "CLAUDE.md"}
+MANAGED_START = "<!-- AIPOLICIES_MANAGED_START -->"
+MANAGED_END = "<!-- AIPOLICIES_MANAGED_END -->"
 
 
 @dataclass(frozen=True)
@@ -191,6 +194,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="apply sync changes (accepted for compatibility; sync applies by default)",
     )
     sync_parser.set_defaults(func=cmd_sync)
+
+    root_parser = subparsers.add_parser(
+        "root-context",
+        help="sync managed Codex/Claude root-context templates",
+        description=(
+            "Sync managed root-context blocks from a bridge's root-context/ "
+            "directory into provider root files such as ~/.codex/CODEX.md and "
+            "~/.claude/CLAUDE.md."
+        ),
+    )
+    root_parser.add_argument(
+        "destinations",
+        nargs="*",
+        help="destination group or names: main, codex, claude, or all (default: main)",
+    )
+    root_parser.add_argument(
+        "--repo",
+        action="append",
+        default=[],
+        help="configured repo name or URL to read root-context templates from",
+    )
+    root_parser.add_argument("--dry-run", action="store_true", help="preview changes without writing")
+    root_parser.set_defaults(func=cmd_root_context)
 
     repo_parser = subparsers.add_parser("repo", help="manage configured repos")
     repo_subparsers = repo_parser.add_subparsers(dest="repo_command", required=True)
@@ -560,8 +586,118 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     return 0
 
 
+def cmd_root_context(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    config = _load_config(args)
+    destinations, destination_errors = _resolve_root_context_destinations(
+        tuple(args.destinations or ("main",))
+    )
+    if destination_errors:
+        for error in destination_errors:
+            print(f"aiskillsync: {error}", file=stderr)
+        return 2
+
+    bridges, bridge_errors = select_bridge_configs(config.bridges, tuple(args.repo or ("all",)))
+    if bridge_errors:
+        for error in bridge_errors:
+            print(f"aiskillsync: {error}", file=stderr)
+        return 1
+    enabled_bridges = tuple(bridge for bridge in bridges if bridge.enabled)
+
+    planned: list[tuple[str, BridgeConfig, Path, Path]] = []
+    errors: list[str] = []
+    for destination in destinations:
+        if destination not in config.ai_skill_paths:
+            errors.append(f"missing ai_skill_paths.{destination} in config")
+            continue
+        template_name = ROOT_CONTEXT_DESTINATIONS[destination]
+        candidates = tuple(
+            (bridge, bridge.path / "root-context" / template_name)
+            for bridge in enabled_bridges
+            if (bridge.path / "root-context" / template_name).is_file()
+        )
+        if not candidates:
+            selector_hint = ", ".join(args.repo) if args.repo else "enabled bridges"
+            errors.append(f"no root-context/{template_name} found in {selector_hint}")
+            continue
+        if len(candidates) > 1:
+            names = ", ".join(bridge.name for bridge, _ in candidates)
+            errors.append(
+                f"multiple root-context/{template_name} templates found ({names}); use --repo"
+            )
+            continue
+        bridge, template = candidates[0]
+        target = config.ai_skill_paths[destination].parent / template_name
+        planned.append((destination, bridge, template, target))
+
+    if errors:
+        for error in errors:
+            print(f"aiskillsync: {error}", file=stderr)
+        return 1
+
+    if args.dry_run:
+        for destination, bridge, template, target in planned:
+            print(
+                f"PLAN root-context {destination}: {template} -> {target} "
+                f"(repo {bridge.name})",
+                file=stdout,
+            )
+        print("Dry run only; no root-context files were changed", file=stdout)
+        return 0
+
+    written: list[Path] = []
+    for destination, bridge, template, target in planned:
+        try:
+            rendered = _render_root_context_target(template, target)
+            atomic_write_text(target, rendered)
+        except OSError as exc:
+            print(f"aiskillsync: could not sync {destination} root-context: {exc}", file=stderr)
+            return 1
+        written.append(target)
+        print(
+            f"SYNC root-context {destination}: {template} -> {target} (repo {bridge.name})",
+            file=stdout,
+        )
+    print(f"Updated {len(written)} root-context file(s)", file=stdout)
+    return 0
+
+
 def _load_config(args: argparse.Namespace) -> Config:
     return load_config(args.config)
+
+
+def _resolve_root_context_destinations(
+    terms: tuple[str, ...]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    selected: list[str] = []
+    errors: list[str] = []
+    for term in terms:
+        if term == "main":
+            selected.extend(("codex", "claude"))
+        elif term == "all":
+            selected.extend(ROOT_CONTEXT_DESTINATIONS)
+        elif term in ROOT_CONTEXT_DESTINATIONS:
+            selected.append(term)
+        else:
+            errors.append(f"unknown root-context destination: {term}")
+    return tuple(dict.fromkeys(selected)), tuple(errors)
+
+
+def _render_root_context_target(template: Path, target: Path) -> str:
+    template_text = template.read_text(encoding="utf-8").strip() + "\n"
+    if MANAGED_START not in template_text or MANAGED_END not in template_text:
+        raise OSError(f"template missing managed markers: {template}")
+    if not target.exists():
+        return template_text
+    existing = target.read_text(encoding="utf-8")
+    start = existing.find(MANAGED_START)
+    end = existing.find(MANAGED_END)
+    if start == -1 or end == -1 or end < start:
+        separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
+        return f"{existing}{separator}{template_text}"
+    end += len(MANAGED_END)
+    if end < len(existing) and existing[end : end + 1] == "\n":
+        end += 1
+    return f"{existing[:start]}{template_text}{existing[end:]}"
 
 
 def _sync_denylist(

@@ -53,6 +53,8 @@ aiskillsync sync bounty-harness --dest codex --dest claude
 aiskillsync sync 1 2
 aiskillsync sync all --dry-run
 aiskillsync sync codex --repo bounty-harness --skill xss --adopt --dry-run
+aiskillsync root-context main --repo ai-policies
+aiskillsync root-context codex --repo ai-policies --dry-run
 ```
 
 You can replace `aiskillsync` with `python3 -m aiskillsync` when running from a
@@ -89,6 +91,7 @@ explicit-adoption slice of Phase 4 from
 - sync-only repo clone/pull materialization
 - default `sync` creation of missing symlinks only
 - opt-in `sync --adopt` migration with backups, skill filters, and denylists
+- managed Codex/Claude root-context sync from bridge `root-context/` templates
 
 `sync` applies by default. The compatibility `--apply` flag is accepted but no
 longer required. Apply is intentionally narrow in Phase 3: it may first clone
@@ -217,6 +220,32 @@ deterministic clone path is `repo_dir/<repo-slug>-<url-hash>`, so the default is
 `~/.config/aiskillsync/repos/<repo-slug>-<url-hash>`. If that path already
 exists, normal sync safety checks apply; aiskillsync does not delete or replace
 it.
+
+## Root Context Command
+
+`root-context` syncs managed provider root-context templates from a configured
+bridge into the provider root files. The source files live under the bridge's
+`root-context/` directory:
+
+```text
+root-context/CODEX.md
+root-context/CLAUDE.md
+```
+
+The provider targets are inferred from `ai_skill_paths`: Codex writes beside
+`~/.codex/skills` as `~/.codex/CODEX.md`, and Claude writes beside
+`~/.claude/skills` as `~/.claude/CLAUDE.md`.
+
+Examples:
+
+```bash
+aiskillsync root-context main --repo ai-policies
+aiskillsync root-context codex --repo ai-policies --dry-run
+```
+
+The command replaces only the `AIPOLICIES_MANAGED` block when the target file
+already has one. If the target exists without that block, the managed block is
+appended so local provider-specific context is preserved.
 
 The old repo-first selector syntax remains supported. `sync all` still means all
 repos into `sync.default_destinations`, and repeated `--dest` flags still
