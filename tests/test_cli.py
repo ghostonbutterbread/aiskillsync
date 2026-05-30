@@ -239,6 +239,97 @@ sync:
         self.assertIn("bridges:", result.stdout)
         self.assertFalse(exists)
 
+    def test_root_context_sync_updates_provider_managed_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            root_context = bridge / "root-context"
+            root_context.mkdir(parents=True)
+            (bridge / "skills" / "policy").mkdir(parents=True)
+            (bridge / "skills" / "policy" / "SKILL.md").write_text("policy", encoding="utf-8")
+            codex_template = (
+                "<!-- AIPOLICIES_MANAGED_START -->\n"
+                "codex shared template\n"
+                "<!-- AIPOLICIES_MANAGED_END -->\n"
+            )
+            claude_template = (
+                "<!-- AIPOLICIES_MANAGED_START -->\n"
+                "claude shared template\n"
+                "<!-- AIPOLICIES_MANAGED_END -->\n"
+            )
+            (root_context / "CODEX.md").write_text(codex_template, encoding="utf-8")
+            (root_context / "CLAUDE.md").write_text(claude_template, encoding="utf-8")
+            codex_skills = base / "codex" / "skills"
+            claude_skills = base / "claude" / "skills"
+            codex_skills.mkdir(parents=True)
+            claude_skills.mkdir(parents=True)
+            codex_root = codex_skills.parent / "CODEX.md"
+            codex_root.write_text(
+                "local prefix\n"
+                "<!-- AIPOLICIES_MANAGED_START -->\n"
+                "old\n"
+                "<!-- AIPOLICIES_MANAGED_END -->\n"
+                "local suffix\n",
+                encoding="utf-8",
+            )
+            config = base / "config.yaml"
+            self.write_config(config, bridge, codex_skills, claude_skills)
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "root-context",
+                "main",
+                "--repo",
+                "local-bridge",
+            )
+            codex_content = codex_root.read_text(encoding="utf-8")
+            claude_content = (claude_skills.parent / "CLAUDE.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SYNC root-context codex", result.stdout)
+        self.assertIn("SYNC root-context claude", result.stdout)
+        self.assertIn("local prefix", codex_content)
+        self.assertIn("codex shared template", codex_content)
+        self.assertIn("local suffix", codex_content)
+        self.assertIn("claude shared template", claude_content)
+
+    def test_root_context_dry_run_does_not_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            root_context = bridge / "root-context"
+            root_context.mkdir(parents=True)
+            (bridge / "skills" / "policy").mkdir(parents=True)
+            (bridge / "skills" / "policy" / "SKILL.md").write_text("policy", encoding="utf-8")
+            (root_context / "CODEX.md").write_text(
+                "<!-- AIPOLICIES_MANAGED_START -->\n"
+                "codex shared template\n"
+                "<!-- AIPOLICIES_MANAGED_END -->\n",
+                encoding="utf-8",
+            )
+            codex_skills = base / "codex" / "skills"
+            claude_skills = base / "claude" / "skills"
+            codex_skills.mkdir(parents=True)
+            claude_skills.mkdir(parents=True)
+            config = base / "config.yaml"
+            self.write_config(config, bridge, codex_skills, claude_skills)
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "root-context",
+                "codex",
+                "--repo",
+                "local-bridge",
+                "--dry-run",
+            )
+            exists = (codex_skills.parent / "CODEX.md").exists()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PLAN root-context codex", result.stdout)
+        self.assertFalse(exists)
+
     def test_pyproject_exposes_only_aiskillsync_console_script(self) -> None:
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 

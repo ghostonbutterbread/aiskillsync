@@ -116,6 +116,8 @@ aiskillsync sync all --dry-run
 aiskillsync add https://github.com/org/ai-skills.git
 aiskillsync add https://github.com/org/ai-skills.git ~/projects/ai-skills
 aiskillsync remove ai-skills
+aiskillsync root-context main --repo ai-policies
+aiskillsync root-context codex --repo ai-policies --dry-run
 ```
 
 ### `init`
@@ -203,6 +205,40 @@ Future Phase 4 adoption command shape:
 ```bash
 aiskillsync sync all --adopt
 ```
+
+### `root-context`
+
+Synchronizes managed Codex and Claude root-context templates from a configured
+bridge into provider root files.
+
+Source files:
+
+```text
+<bridge-root>/root-context/CODEX.md
+<bridge-root>/root-context/CLAUDE.md
+```
+
+Target files are inferred from `ai_skill_paths`:
+
+- `codex` -> parent of `ai_skill_paths.codex` plus `CODEX.md`
+- `claude` -> parent of `ai_skill_paths.claude` plus `CLAUDE.md`
+
+Examples:
+
+```bash
+aiskillsync root-context main --repo ai-policies
+aiskillsync root-context codex --repo ai-policies --dry-run
+```
+
+Safety rules:
+
+- only `codex`, `claude`, `main`, and `all` are valid destinations
+- use `--repo` when multiple enabled bridges provide the same template
+- replace only the `AIPOLICIES_MANAGED` block when the target file already has
+  one
+- append the managed block when the target exists without one, preserving local
+  provider-specific context
+- require templates to contain `AIPOLICIES_MANAGED` start/end markers
 
 Default behavior:
 
