@@ -1861,6 +1861,108 @@ sync:
         self.assertEqual(codex_target, skill.resolve())
         self.assertEqual(claude_target, skill.resolve())
 
+    def test_sync_prunes_deleted_managed_skill_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            kept_skill = self.write_skill(bridge / "skills", "kept")
+            deleted_skill = self.write_skill(bridge / "skills", "deleted")
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "SKILL.md").write_text("outside", encoding="utf-8")
+            (codex / "kept").symlink_to(kept_skill, target_is_directory=True)
+            (codex / "deleted").symlink_to(deleted_skill, target_is_directory=True)
+            (codex / "unrelated").symlink_to(outside, target_is_directory=True)
+            (deleted_skill / "SKILL.md").unlink()
+            deleted_skill.rmdir()
+            config = base / "config.yaml"
+            self.write_phase3_config(config, [("local", bridge)], {"codex": codex})
+
+            dry_run = self.run_cli("--config", str(config), "sync", "all", "--dry-run")
+            deleted_after_dry_run = (codex / "deleted").is_symlink()
+            apply_result = self.run_cli("--config", str(config), "sync", "all")
+            deleted_after_apply = (codex / "deleted").exists() or (codex / "deleted").is_symlink()
+            kept_target = (codex / "kept").resolve() if (codex / "kept").is_symlink() else None
+            unrelated_target = (
+                (codex / "unrelated").resolve() if (codex / "unrelated").is_symlink() else None
+            )
+
+        self.assertEqual(dry_run.returncode, 0, dry_run.stdout + dry_run.stderr)
+        self.assertIn("PRUNE codex:deleted", dry_run.stdout)
+        self.assertIn("pruned=1", dry_run.stdout)
+        self.assertTrue(deleted_after_dry_run)
+
+        self.assertEqual(apply_result.returncode, 0, apply_result.stdout + apply_result.stderr)
+        self.assertIn("PRUNE codex:deleted", apply_result.stdout)
+        self.assertIn("Removed stale symlinks:", apply_result.stdout)
+        self.assertIn("codex:deleted", apply_result.stdout)
+        self.assertFalse(deleted_after_apply)
+        self.assertEqual(kept_target, kept_skill.resolve())
+        self.assertEqual(unrelated_target, outside.resolve())
+
+    def test_sync_does_not_prune_symlink_when_skill_exists_in_another_selected_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            old_bridge = base / "old-bridge"
+            new_bridge = base / "new-bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            old_skill = self.write_skill(old_bridge / "skills", "shared-name")
+            new_skill = self.write_skill(new_bridge / "skills", "shared-name")
+            (codex / "shared-name").symlink_to(old_skill, target_is_directory=True)
+            (old_skill / "SKILL.md").unlink()
+            old_skill.rmdir()
+            config = base / "config.yaml"
+            self.write_phase3_config(
+                config,
+                [("old", old_bridge), ("new", new_bridge)],
+                {"codex": codex},
+            )
+
+            result = self.run_cli("--config", str(config), "sync", "all", "--dry-run")
+            still_linked = (codex / "shared-name").is_symlink()
+            target = (codex / "shared-name").resolve(strict=False)
+            new_skill_existed = new_skill.is_dir()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONFLICT codex:shared-name", result.stdout)
+        self.assertNotIn("PRUNE codex:shared-name", result.stdout)
+        self.assertTrue(still_linked)
+        self.assertEqual(target, old_skill.resolve(strict=False))
+        self.assertTrue(new_skill_existed)
+
+    def test_sync_applies_prunes_even_when_unrelated_conflicts_block_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            blocked = self.write_skill(bridge / "skills", "blocked")
+            deleted = self.write_skill(bridge / "skills", "deleted")
+            (codex / "blocked").mkdir()
+            (codex / "deleted").symlink_to(deleted, target_is_directory=True)
+            (deleted / "SKILL.md").unlink()
+            deleted.rmdir()
+            config = base / "config.yaml"
+            self.write_phase3_config(config, [("local", bridge)], {"codex": codex})
+
+            result = self.run_cli("--config", str(config), "sync", "all")
+            blocked_exists = (codex / "blocked").is_dir()
+            deleted_exists = (codex / "deleted").exists() or (codex / "deleted").is_symlink()
+            blocked_source_linked = (codex / "blocked").is_symlink()
+            blocked_source_exists = blocked.is_dir()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("PRUNE codex:deleted", result.stdout)
+        self.assertIn("Removed stale symlinks:", result.stdout)
+        self.assertIn("Apply blocked", result.stdout)
+        self.assertTrue(blocked_exists)
+        self.assertFalse(deleted_exists)
+        self.assertFalse(blocked_source_linked)
+        self.assertTrue(blocked_source_exists)
+
     def test_sync_verbose_shows_skipped_destination_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

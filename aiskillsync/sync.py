@@ -63,6 +63,10 @@ class SyncPlan:
         return tuple(action for action in self.actions if action.action == "adopt")
 
     @property
+    def prunes(self) -> tuple[SyncAction, ...]:
+        return tuple(action for action in self.actions if action.action == "prune")
+
+    @property
     def skips(self) -> tuple[SyncAction, ...]:
         return tuple(action for action in self.actions if action.action == "skip")
 
@@ -82,6 +86,12 @@ class RepositoryMaterialization:
 class PullResult:
     error: str | None = None
     updated: bool = False
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    created: tuple[str, ...] = ()
+    pruned: tuple[str, ...] = ()
 
 
 def materialize_repositories_for_sync(
@@ -269,6 +279,8 @@ def build_sync_plan(
                         action=action,
                     )
                 )
+            if not include_skill_names and not exclude_skill_names:
+                actions.extend(_stale_managed_symlink_actions(dest_name, dest_root, selected))
 
     return SyncPlan(
         dry_run=dry_run,
@@ -391,8 +403,8 @@ def _normalize_repo_url(value: str) -> str:
     return value.strip().rstrip("/")
 
 
-def apply_sync_plan(plan: SyncPlan) -> tuple[str, ...]:
-    """Create missing symlinks and, when requested, adopt existing entries."""
+def apply_sync_plan(plan: SyncPlan) -> ApplyResult:
+    """Create missing symlinks, prune stale managed symlinks, and adopt when requested."""
 
     if plan.has_blockers:
         raise ValueError("cannot apply a sync plan with blockers")
@@ -400,9 +412,10 @@ def apply_sync_plan(plan: SyncPlan) -> tuple[str, ...]:
         raise ValueError("adoption requires a backup root")
 
     created: list[str] = []
+    pruned: list[str] = []
     seen_action_paths: dict[Path, SyncAction] = {}
-    for action in (*plan.links, *plan.adoptions):
-        action_path = _canonical_path(action.status.path)
+    for action in (*plan.links, *plan.adoptions, *plan.prunes):
+        action_path = _destination_action_path(action.status.path)
         previous = seen_action_paths.get(action_path)
         if previous is not None:
             raise ValueError(
@@ -411,7 +424,9 @@ def apply_sync_plan(plan: SyncPlan) -> tuple[str, ...]:
                 f"{action.destination}:{action.skill.name} -> {action_path}"
             )
         seen_action_paths[action_path] = action
-    for dest_root in {action.destination_root for action in (*plan.links, *plan.adoptions)}:
+    for dest_root in {
+        action.destination_root for action in (*plan.links, *plan.adoptions, *plan.prunes)
+    }:
         conflict = destination_root_conflict(dest_root)
         if conflict is not None:
             raise ValueError(conflict)
@@ -429,10 +444,19 @@ def apply_sync_plan(plan: SyncPlan) -> tuple[str, ...]:
                 f"destination changed before adoption: {action.destination}:{action.skill.name} "
                 f"is now {current.label}"
             )
+    for action in plan.prunes:
+        if not _is_stale_managed_symlink(action):
+            raise ValueError(
+                f"destination changed before prune: {action.destination}:{action.skill.name} "
+                f"is no longer a stale managed symlink"
+            )
     for action in plan.adoptions:
         backup_path = _backup_path(plan.backup_root, action)
         backup_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(action.status.path), str(backup_path))
+    for action in plan.prunes:
+        action.status.path.unlink()
+        pruned.append(f"{action.destination}:{action.skill.name}")
     for action in plan.links:
         action.destination_root.mkdir(parents=True, exist_ok=True)
         action.status.path.symlink_to(action.skill.path, target_is_directory=True)
@@ -441,7 +465,126 @@ def apply_sync_plan(plan: SyncPlan) -> tuple[str, ...]:
         action.destination_root.mkdir(parents=True, exist_ok=True)
         action.status.path.symlink_to(action.skill.path, target_is_directory=True)
         created.append(f"{action.destination}:{action.skill.name}")
-    return tuple(created)
+    return ApplyResult(created=tuple(created), pruned=tuple(pruned))
+
+
+def apply_prune_actions(plan: SyncPlan) -> tuple[str, ...]:
+    """Remove stale managed symlinks even when unrelated sync blockers exist."""
+
+    pruned: list[str] = []
+    seen_action_paths: dict[Path, SyncAction] = {}
+    for action in plan.prunes:
+        action_path = _destination_action_path(action.status.path)
+        previous = seen_action_paths.get(action_path)
+        if previous is not None:
+            raise ValueError(
+                "duplicate prune action path: "
+                f"{previous.destination}:{previous.skill.name} and "
+                f"{action.destination}:{action.skill.name} -> {action_path}"
+            )
+        seen_action_paths[action_path] = action
+    for dest_root in {action.destination_root for action in plan.prunes}:
+        conflict = destination_root_conflict(dest_root)
+        if conflict is not None:
+            raise ValueError(conflict)
+    for action in plan.prunes:
+        if not _is_stale_managed_symlink(action):
+            raise ValueError(
+                f"destination changed before prune: {action.destination}:{action.skill.name} "
+                f"is no longer a stale managed symlink"
+            )
+    for action in plan.prunes:
+        action.status.path.unlink()
+        pruned.append(f"{action.destination}:{action.skill.name}")
+    return tuple(pruned)
+
+
+def _stale_managed_symlink_actions(
+    dest_name: str, dest_root: Path, discoveries: tuple[BridgeDiscovery, ...]
+) -> tuple[SyncAction, ...]:
+    if not dest_root.is_dir():
+        return ()
+
+    managed_roots: dict[Path, BridgeDiscovery] = {}
+    current_names_by_root: dict[Path, frozenset[str]] = {}
+    for discovery in discoveries:
+        if (
+            not discovery.bridge.enabled
+            or not discovery.root_exists
+            or not discovery.root_is_dir
+            or not discovery.exists
+            or discovery.missing_skill_md
+        ):
+            continue
+        root = _canonical_path(discovery.skills_dir)
+        managed_roots[root] = discovery
+        current_names_by_root[root] = frozenset(skill.name for skill in discovery.skills)
+
+    if not managed_roots:
+        return ()
+
+    all_current_names = frozenset(
+        name for names in current_names_by_root.values() for name in names
+    )
+    actions: list[SyncAction] = []
+    for entry in sorted(dest_root.iterdir(), key=lambda item: item.name):
+        if not entry.is_symlink():
+            continue
+        if entry.name in all_current_names:
+            continue
+        target = _canonical_path(entry)
+        for root, discovery in managed_roots.items():
+            if not _is_relative_to(target, root):
+                continue
+            if entry.name in current_names_by_root[root]:
+                break
+            skill = Skill(
+                name=entry.name,
+                bridge=discovery.bridge,
+                path=target,
+                skill_md=target / "SKILL.md",
+            )
+            actions.append(
+                SyncAction(
+                    destination=dest_name,
+                    destination_root=dest_root,
+                    skill=skill,
+                    status=DestinationStatus(
+                        key="stale-managed-symlink",
+                        label="stale managed symlink",
+                        path=entry,
+                        detail=f"{entry} -> {entry.readlink()}",
+                    ),
+                    action="prune",
+                )
+            )
+            break
+    return tuple(actions)
+
+
+def _is_stale_managed_symlink(action: SyncAction) -> bool:
+    path = action.status.path
+    if not path.is_symlink():
+        return False
+    target = _canonical_path(path)
+    skills_root = _canonical_path(action.skill.bridge.skills_dir)
+    current_source = skills_root / path.name / "SKILL.md"
+    return _is_relative_to(target, skills_root) and not current_source.is_file()
+
+
+def _destination_action_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return Path.cwd() / expanded
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
 
 
 def make_backup_root() -> Path:
