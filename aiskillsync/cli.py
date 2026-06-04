@@ -42,6 +42,7 @@ from .discovery import (
 from .sync import (
     SyncAction,
     SyncPlan,
+    apply_prune_actions,
     apply_sync_plan,
     build_sync_plan,
     make_backup_root,
@@ -560,6 +561,17 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     _print_sync_plan(plan, stdout, verbosity=args.verbose)
 
     if plan.has_blockers:
+        if plan.prunes and not dry_run:
+            try:
+                pruned = apply_prune_actions(plan)
+            except (OSError, ValueError) as exc:
+                print(f"aiskillsync: prune failed: {exc}", file=stderr)
+                _print_sync_summary(plan, "blocked", stdout)
+                return 1
+            if pruned:
+                print("Removed stale symlinks:", file=stdout)
+                for item in pruned:
+                    print(f"  {item}", file=stdout)
         print(_colorize("Apply blocked by errors or conflicts", "red", stdout), file=stdout)
         _print_sync_summary(plan, "blocked", stdout)
         return 1
@@ -569,18 +581,22 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         return 0
 
     try:
-        created = apply_sync_plan(plan)
+        result = apply_sync_plan(plan)
     except (OSError, ValueError) as exc:
         print(f"aiskillsync: apply failed: {exc}", file=stderr)
         _print_sync_summary(plan, "blocked", stdout)
         return 1
-    if created:
+    if result.pruned:
+        print("Removed stale symlinks:", file=stdout)
+        for item in result.pruned:
+            print(f"  {item}", file=stdout)
+    if result.created:
         print("Created symlinks:", file=stdout)
-        for item in created:
+        for item in result.created:
             print(f"  {item}", file=stdout)
         if plan.backup_root is not None and plan.adoptions:
             print(f"Backups written to: {plan.backup_root}", file=stdout)
-    else:
+    elif not result.pruned:
         print("No symlinks needed", file=stdout)
     _print_sync_summary(plan, "applied", stdout)
     return 0
@@ -1645,6 +1661,9 @@ def _format_sync_action(
     elif action.action == "adopt":
         verb = "ADOPT"
         color = "blue" if dry_run else "green"
+    elif action.action == "prune":
+        verb = "PRUNE"
+        color = "blue" if dry_run else "green"
     elif action.action == "skip":
         verb = "SKIP"
         color = "yellow"
@@ -1680,6 +1699,7 @@ def _print_sync_summary(plan: SyncPlan, final_status: str, stdout: TextIO) -> No
         "  destination actions: "
         f"linked={destination_counts['linked']}, "
         f"adopted={destination_counts['adopted']}, "
+        f"pruned={destination_counts['pruned']}, "
         f"skipped={destination_counts['skipped']}, "
         f"conflicts={destination_counts['conflicts']}, "
         f"errors={destination_counts['errors']}, "
@@ -1707,6 +1727,7 @@ def _destination_summary_counts(plan: SyncPlan) -> dict[str, int]:
     return {
         "linked": len(plan.links),
         "adopted": len(plan.adoptions),
+        "pruned": len(plan.prunes),
         "skipped": len(plan.skips),
         "conflicts": len(plan.conflicts),
         "errors": errors,
