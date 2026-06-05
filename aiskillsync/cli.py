@@ -174,6 +174,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sync_parser.add_argument(
+        "--overwrite",
+        "--overwrite-local-copies",
+        dest="overwrite_local_copies",
+        action="store_true",
+        help=(
+            "alias for --adopt: back up existing destination copies/conflicts "
+            "and replace them with symlinks to the selected repo skills"
+        ),
+    )
+    sync_parser.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -524,8 +534,9 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
     request = _resolve_sync_request(config, args)
     dry_run = args.dry_run
+    adopt = args.adopt or args.overwrite_local_copies
     denylist, denylist_errors = _sync_denylist(config, args)
-    backup_root = make_backup_root() if args.adopt else None
+    backup_root = make_backup_root() if adopt else None
     repo_preflight = _sync_repo_preflight(
         request.config,
         request.repo_selectors,
@@ -545,7 +556,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         request.repo_selectors,
         request.destinations,
         dry_run=dry_run,
-        adopt=args.adopt,
+        adopt=adopt,
         include_skills=tuple(args.skill),
         exclude_skills=denylist,
         preflight_notices=(*request.notices, *repo_preflight.notices, *materialization.notices),
@@ -558,6 +569,40 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         skipped_missing_repos=materialization.skipped_missing_roots,
         backup_root=backup_root,
     )
+    if (
+        not dry_run
+        and not adopt
+        and plan.conflicts
+        and not plan.errors
+        and not plan.duplicate_skills
+        and _interactive_prompt_available(sys.stdin, stdout)
+        and _confirm_conflict_overwrite(plan.conflicts, sys.stdin, stdout)
+    ):
+        adopt = True
+        backup_root = make_backup_root()
+        plan = build_sync_plan(
+            request.config,
+            request.repo_selectors,
+            request.destinations,
+            dry_run=dry_run,
+            adopt=True,
+            include_skills=tuple(args.skill),
+            exclude_skills=denylist,
+            preflight_notices=(
+                *request.notices,
+                *repo_preflight.notices,
+                *materialization.notices,
+                "WARN destination conflicts accepted for overwrite; existing entries will be backed up first",
+            ),
+            preflight_errors=(
+                *request.errors,
+                *denylist_errors,
+                *repo_preflight.errors,
+                *materialization.errors,
+            ),
+            skipped_missing_repos=materialization.skipped_missing_roots,
+            backup_root=backup_root,
+        )
     _print_sync_plan(plan, stdout, verbosity=args.verbose)
 
     if plan.has_blockers:
@@ -1328,6 +1373,33 @@ def _confirm_github_sync_continue(
         return True
     print("", file=stdout)
     return answer.strip().lower() not in {"n", "no"}
+
+
+def _confirm_conflict_overwrite(
+    conflicts: tuple[SyncAction, ...],
+    stdin: TextIO,
+    stdout: TextIO,
+) -> bool:
+    print(
+        "Destination skill conflicts would be backed up and overwritten with "
+        "symlinks to the selected repo skills:",
+        file=stdout,
+    )
+    for action in conflicts[:10]:
+        print(
+            f"  - {action.destination}:{action.skill.name} {action.status.label} "
+            f"({action.status.detail})",
+            file=stdout,
+        )
+    if len(conflicts) > 10:
+        print(f"  - ... {len(conflicts) - 10} more", file=stdout)
+    print("Overwrite these destination entries after backup? [y/N] ", end="", file=stdout, flush=True)
+    answer = stdin.readline()
+    if not answer:
+        print("", file=stdout)
+        return False
+    print("", file=stdout)
+    return answer.strip().lower() in {"y", "yes"}
 
 
 def _repo_add_conflicts(config: Config, repo: BridgeConfig) -> tuple[str, ...]:
