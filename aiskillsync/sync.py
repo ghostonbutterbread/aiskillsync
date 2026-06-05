@@ -237,10 +237,16 @@ def build_sync_plan(
     selected_names = {skill.name for skill in selected_skills}
     missing_includes = include_skill_names - selected_names
     if missing_includes:
-        errors.append(
-            "selected skill names not found in selected repos: "
-            + ", ".join(sorted(missing_includes))
-        )
+        if skipped_missing_repo_names and not selected_skills:
+            notices.append(
+                "SKIP selected skill lookup because repo sync was skipped: "
+                + ", ".join(sorted(missing_includes))
+            )
+        else:
+            errors.append(
+                "selected skill names not found in selected repos: "
+                + ", ".join(sorted(missing_includes))
+            )
     if exclude_skill_names:
         notices.append(
             "SKIP migration denylist: " + ", ".join(sorted(exclude_skill_names))

@@ -1824,6 +1824,90 @@ sync:
         self.assertIn("final status: applied", stdout.getvalue())
         self.assertEqual(log_text, "")
 
+    def test_sync_interactive_github_prompt_can_skip_clone_with_skill_filter(self) -> None:
+        class TtyInput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        class TtyOutput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            bridge = base / "clone-target"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: git@github.com:example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: true
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            parser = cli_module.build_parser()
+            args = parser.parse_args(
+                [
+                    "--config",
+                    str(config),
+                    "sync",
+                    "codex",
+                    "--repo",
+                    "private-tools",
+                    "--skill",
+                    "xss",
+                ]
+            )
+            stdout = TtyOutput()
+            stderr = io.StringIO()
+            stdin = TtyInput("n\n")
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "FORCE_COLOR": "0",
+                    "NO_COLOR": "1",
+                    "GH_TOKEN": "",
+                    "GITHUB_TOKEN": "",
+                    "GITHUB_ENTERPRISE_TOKEN": "",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(sys, "stdin", stdin):
+                    result = cli_module.cmd_sync(args, stdout, stderr)
+
+            log_text = log.read_text(encoding="utf-8") if log.exists() else ""
+
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertIn(
+            "SKIP repo private-tools: clone skipped because GitHub auth was not confirmed",
+            stdout.getvalue(),
+        )
+        self.assertIn(
+            "SKIP selected skill lookup because repo sync was skipped: xss",
+            stdout.getvalue(),
+        )
+        self.assertIn("final status: applied", stdout.getvalue())
+        self.assertEqual(log_text, "")
+
     def test_sync_applies_by_default_and_creates_only_missing_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -2151,6 +2235,122 @@ sync:
         self.assertEqual(target, source.resolve())
         self.assertEqual(len(backups), 1)
         self.assertTrue(backup_note_exists)
+
+    def test_sync_overwrite_alias_backs_up_existing_directory_and_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            home.mkdir()
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            source = self.write_skill(bridge / "skills", "legacy", "repo-owned")
+            old = codex / "legacy"
+            old.mkdir()
+            (old / "SKILL.md").write_text("legacy-copy", encoding="utf-8")
+            config = base / "config.yaml"
+            self.write_phase3_config(config, [("local", bridge)], {"codex": codex})
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "codex",
+                "--repo",
+                "local",
+                "--skill",
+                "legacy",
+                "--overwrite",
+                env={"HOME": str(home)},
+            )
+            link = codex / "legacy"
+            target = link.resolve() if link.is_symlink() else None
+            backups = list((home / ".cache" / "aiskillsync-migration").glob("*/codex/legacy"))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ADOPT codex:legacy", result.stdout)
+        self.assertEqual(target, source.resolve())
+        self.assertEqual(len(backups), 1)
+
+    def test_sync_interactive_conflict_yes_overwrites_after_backup(self) -> None:
+        class TtyInput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        class TtyOutput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            home.mkdir()
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            source = self.write_skill(bridge / "skills", "legacy", "repo-owned")
+            old = codex / "legacy"
+            old.mkdir()
+            (old / "SKILL.md").write_text("legacy-copy", encoding="utf-8")
+            config = base / "config.yaml"
+            self.write_phase3_config(config, [("local", bridge)], {"codex": codex})
+            parser = cli_module.build_parser()
+            args = parser.parse_args(
+                ["--config", str(config), "sync", "codex", "--repo", "local", "--skill", "legacy"]
+            )
+            stdout = TtyOutput()
+            stderr = io.StringIO()
+
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                with mock.patch.object(sys, "stdin", TtyInput("y\n")):
+                    result = cli_module.cmd_sync(args, stdout, stderr)
+            link = codex / "legacy"
+            target = link.resolve() if link.is_symlink() else None
+            backups = list((home / ".cache" / "aiskillsync-migration").glob("*/codex/legacy"))
+
+        self.assertEqual(result, 0, stdout.getvalue() + stderr.getvalue())
+        self.assertIn("Overwrite these destination entries after backup? [y/N]", stdout.getvalue())
+        self.assertIn("ADOPT codex:legacy", stdout.getvalue())
+        self.assertEqual(target, source.resolve())
+        self.assertEqual(len(backups), 1)
+
+    def test_sync_interactive_conflict_no_still_blocks(self) -> None:
+        class TtyInput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        class TtyOutput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "legacy", "repo-owned")
+            old = codex / "legacy"
+            old.mkdir()
+            (old / "SKILL.md").write_text("legacy-copy", encoding="utf-8")
+            config = base / "config.yaml"
+            self.write_phase3_config(config, [("local", bridge)], {"codex": codex})
+            parser = cli_module.build_parser()
+            args = parser.parse_args(
+                ["--config", str(config), "sync", "codex", "--repo", "local", "--skill", "legacy"]
+            )
+            stdout = TtyOutput()
+            stderr = io.StringIO()
+
+            with mock.patch.object(sys, "stdin", TtyInput("n\n")):
+                result = cli_module.cmd_sync(args, stdout, stderr)
+            destination_is_dir = old.is_dir()
+            destination_is_symlink = old.is_symlink()
+
+        self.assertEqual(result, 1, stdout.getvalue() + stderr.getvalue())
+        self.assertIn("Overwrite these destination entries after backup? [y/N]", stdout.getvalue())
+        self.assertIn("CONFLICT codex:legacy", stdout.getvalue())
+        self.assertTrue(destination_is_dir)
+        self.assertFalse(destination_is_symlink)
 
     def test_sync_adopt_dry_run_does_not_mutate_existing_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
