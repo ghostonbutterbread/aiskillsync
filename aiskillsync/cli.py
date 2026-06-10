@@ -52,7 +52,7 @@ from .sync import (
 
 
 DESTINATION_GROUPS = ("main", "codex", "claude", "ghost", "openclaw", "opencode", "all")
-ROOT_CONTEXT_DESTINATIONS = {"codex": "CODEX.md", "claude": "CLAUDE.md", "opencode": "OPENCODE.md"}
+ROOT_CONTEXT_DESTINATIONS = {"codex": "CODEX.md", "claude": "CLAUDE.md", "opencode": "AGENTS.md"}
 MANAGED_START = "<!-- AIPOLICIES_MANAGED_START -->"
 MANAGED_END = "<!-- AIPOLICIES_MANAGED_END -->"
 
