@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import shutil
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -142,7 +143,7 @@ def materialize_repositories_for_sync(
                 )
                 continue
             notices.append(_pull_notice(bridge, dry_run=dry_run))
-            skills_before_pull = _skill_names(bridge)
+            skill_fingerprints_before_pull = _skill_fingerprints(bridge)
             if dry_run:
                 continue
             if not _is_git_repo_root(bridge.path):
@@ -157,7 +158,11 @@ def materialize_repositories_for_sync(
                 notices.append(
                     f"UPDATED repo {bridge.name}: pulled new source changes; linked skills now use the updated files"
                 )
-                notices.extend(_skill_inventory_change_notices(bridge, skills_before_pull))
+                notices.extend(
+                    _skill_inventory_change_notices(
+                        bridge, skill_fingerprints_before_pull
+                    )
+                )
             else:
                 notices.append(f"UNCHANGED repo {bridge.name}: already up to date")
 
@@ -699,14 +704,23 @@ def _pull_output_indicates_update(result: subprocess.CompletedProcess[str]) -> b
 
 
 def _skill_inventory_change_notices(
-    bridge: BridgeConfig, skills_before_pull: frozenset[str]
+    bridge: BridgeConfig, skill_fingerprints_before_pull: dict[str, str]
 ) -> tuple[str, ...]:
-    skills_after_pull = _skill_names(bridge)
+    skill_fingerprints_after_pull = _skill_fingerprints(bridge)
+    skills_before_pull = frozenset(skill_fingerprints_before_pull)
+    skills_after_pull = frozenset(skill_fingerprints_after_pull)
     added = sorted(skills_after_pull - skills_before_pull)
     removed = sorted(skills_before_pull - skills_after_pull)
+    updated = sorted(
+        name
+        for name in skills_before_pull & skills_after_pull
+        if skill_fingerprints_before_pull[name] != skill_fingerprints_after_pull[name]
+    )
     notices: list[str] = []
     if added:
         notices.append(f"ADDED skills in repo {bridge.name}: {', '.join(added)}")
+    if updated:
+        notices.append(f"UPDATED skills in repo {bridge.name}: {', '.join(updated)}")
     if removed:
         notices.append(f"REMOVED skills in repo {bridge.name}: {', '.join(removed)}")
     return tuple(notices)
@@ -721,6 +735,37 @@ def _skill_names(bridge: BridgeConfig) -> frozenset[str]:
         for child in skills_dir.iterdir()
         if child.is_dir() and (child / "SKILL.md").is_file()
     )
+
+
+def _skill_fingerprints(bridge: BridgeConfig) -> dict[str, str]:
+    skills_dir = bridge.skills_dir
+    if not skills_dir.is_dir():
+        return {}
+    fingerprints: dict[str, str] = {}
+    for child in skills_dir.iterdir():
+        if child.is_dir() and (child / "SKILL.md").is_file():
+            fingerprints[child.name] = _directory_fingerprint(child)
+    return fingerprints
+
+
+def _directory_fingerprint(path: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(path.rglob("*")):
+        if item.is_symlink():
+            continue
+        relative = item.relative_to(path).as_posix()
+        if item.is_dir():
+            digest.update(f"dir:{relative}\0".encode("utf-8"))
+            continue
+        if not item.is_file():
+            continue
+        digest.update(f"file:{relative}\0".encode("utf-8"))
+        try:
+            digest.update(item.read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _is_git_repo_root(path: Path) -> bool:

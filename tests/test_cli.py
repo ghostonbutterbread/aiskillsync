@@ -80,6 +80,11 @@ if len(args) == 4 and args[0] == "-C" and args[2:] == ["pull", "--ff-only"]:
         skill_dir = pathlib.Path(args[1]) / "skills" / created_skill
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text("created during pull", encoding="utf-8")
+    modified_skill = os.environ.get("AISKILLSYNC_FAKE_GIT_PULL_MODIFY_SKILL")
+    if modified_skill:
+        skill_dir = pathlib.Path(args[1]) / "skills" / modified_skill
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("modified during pull", encoding="utf-8")
     sys.exit(exit_code)
 
 if len(args) == 4 and args[0] == "-C" and args[2:] == ["rev-parse", "--is-inside-work-tree"]:
@@ -1599,6 +1604,52 @@ sync:
         self.assertIn("ADDED skills in repo private-tools: fresh-skill", result.stdout)
         self.assertIn("LINK codex:fresh-skill", result.stdout)
         self.assertEqual(target, (bridge / "skills" / "fresh-skill").resolve())
+
+    def test_sync_reports_updated_existing_skills_from_pull(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "existing", "before")
+            (bridge / ".git").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_PULL_OUTPUT": "Fast-forward",
+                    "AISKILLSYNC_FAKE_GIT_PULL_MODIFY_SKILL": "existing",
+                },
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("UPDATED skills in repo private-tools: existing", result.stdout)
 
     def test_sync_reports_unchanged_pulled_repos(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
