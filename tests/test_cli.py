@@ -87,6 +87,49 @@ if len(args) == 4 and args[0] == "-C" and args[2:] == ["pull", "--ff-only"]:
         (skill_dir / "SKILL.md").write_text("modified during pull", encoding="utf-8")
     sys.exit(exit_code)
 
+if len(args) == 4 and args[0] == "-C" and args[2:] == ["fetch", "--prune"]:
+    exit_code = int(os.environ.get("AISKILLSYNC_FAKE_GIT_FETCH_EXIT", "0"))
+    if exit_code:
+        print("fake fetch failed", file=sys.stderr)
+    fetch_output = os.environ.get("AISKILLSYNC_FAKE_GIT_FETCH_OUTPUT")
+    if fetch_output:
+        print(fetch_output)
+    sys.exit(exit_code)
+
+if len(args) == 5 and args[0] == "-C" and args[2:4] == ["reset", "--hard"]:
+    exit_code = int(os.environ.get("AISKILLSYNC_FAKE_GIT_RESET_EXIT", "0"))
+    if exit_code:
+        print("fake reset failed", file=sys.stderr)
+    reset_output = os.environ.get("AISKILLSYNC_FAKE_GIT_RESET_OUTPUT")
+    if reset_output:
+        print(reset_output)
+    created_skill = os.environ.get("AISKILLSYNC_FAKE_GIT_RESET_CREATE_SKILL")
+    if created_skill:
+        skill_dir = pathlib.Path(args[1]) / "skills" / created_skill
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("created during reset", encoding="utf-8")
+    modified_skill = os.environ.get("AISKILLSYNC_FAKE_GIT_RESET_MODIFY_SKILL")
+    if modified_skill:
+        skill_dir = pathlib.Path(args[1]) / "skills" / modified_skill
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("modified during reset", encoding="utf-8")
+    sys.exit(exit_code)
+
+if len(args) == 4 and args[0] == "-C" and args[2:] == ["clean", "-fd"]:
+    exit_code = int(os.environ.get("AISKILLSYNC_FAKE_GIT_CLEAN_EXIT", "0"))
+    if exit_code:
+        print("fake clean failed", file=sys.stderr)
+    clean_output = os.environ.get("AISKILLSYNC_FAKE_GIT_CLEAN_OUTPUT")
+    if clean_output:
+        print(clean_output)
+    remove_skill = os.environ.get("AISKILLSYNC_FAKE_GIT_CLEAN_REMOVE_SKILL")
+    if remove_skill:
+        skill_dir = pathlib.Path(args[1]) / "skills" / remove_skill
+        if skill_dir.exists():
+            import shutil
+            shutil.rmtree(skill_dir)
+    sys.exit(exit_code)
+
 if len(args) == 4 and args[0] == "-C" and args[2:] == ["rev-parse", "--is-inside-work-tree"]:
     print("true")
     sys.exit(0)
@@ -1552,6 +1595,121 @@ sync:
             "UPDATED repo private-tools: pulled new source changes; linked skills now use the updated files",
             result.stdout,
         )
+
+    def test_sync_overwrite_force_refreshes_repo_before_linking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "existing", "before")
+            (bridge / ".git").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    branch: main
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                "--overwrite",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_LOG": str(log),
+                    "AISKILLSYNC_FAKE_GIT_RESET_OUTPUT": "HEAD is now at abc123 remote",
+                    "AISKILLSYNC_FAKE_GIT_RESET_MODIFY_SKILL": "existing",
+                },
+            )
+            link = codex / "existing"
+            target = link.resolve() if link.is_symlink() else None
+            log_text = log.read_text(encoding="utf-8") if log.exists() else ""
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"FORCE repo private-tools: git -C {bridge} fetch --prune", result.stdout)
+        self.assertIn("reset --hard origin/main", result.stdout)
+        self.assertIn("UPDATED skills in repo private-tools: existing", result.stdout)
+        self.assertIn(f"-C {bridge} fetch --prune", log_text)
+        self.assertIn(f"-C {bridge} reset --hard origin/main", log_text)
+        self.assertIn(f"-C {bridge} clean -fd", log_text)
+        self.assertNotIn("pull --ff-only", log_text)
+        self.assertEqual(target, (bridge / "skills" / "existing").resolve())
+
+    def test_sync_overwrite_force_refresh_failure_blocks_destination_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fake_git = self.write_fake_git(base)
+            log = base / "git.log"
+            bridge = base / "bridge"
+            codex = base / "codex"
+            codex.mkdir()
+            self.write_skill(bridge / "skills", "blocked")
+            (bridge / ".git").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: private-tools
+    repo: https://github.com/example/private-tools.git
+    path: {bridge}
+    skills_path: skills
+    branch: main
+    enabled: true
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  mode: symlink
+  pull_before_sync: true
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "sync",
+                "all",
+                "--overwrite",
+                env={
+                    "PATH": f"{fake_git}:{os.environ['PATH']}",
+                    "AISKILLSYNC_FAKE_GIT_LOG": str(log),
+                    "AISKILLSYNC_FAKE_GIT_RESET_EXIT": "7",
+                },
+            )
+            created = (codex / "blocked").exists()
+            log_text = log.read_text(encoding="utf-8") if log.exists() else ""
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("ERROR repo private-tools: git reset --hard origin/main failed with exit 7", result.stdout)
+        self.assertIn(f"-C {bridge} fetch --prune", log_text)
+        self.assertIn(f"-C {bridge} reset --hard origin/main", log_text)
+        self.assertNotIn(f"-C {bridge} clean -fd", log_text)
+        self.assertFalse(created)
 
     def test_sync_reports_added_skills_from_pull(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

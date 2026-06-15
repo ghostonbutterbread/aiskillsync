@@ -100,6 +100,7 @@ def materialize_repositories_for_sync(
     selectors: tuple[str, ...],
     *,
     dry_run: bool,
+    force_repo_refresh: bool = False,
     skip_clone_bridges: frozenset[str] = frozenset(),
     skip_pull_bridges: frozenset[str] = frozenset(),
 ) -> RepositoryMaterialization:
@@ -142,7 +143,11 @@ def materialize_repositories_for_sync(
                     f"SKIP repo {bridge.name}: pull skipped because GitHub auth was not confirmed"
                 )
                 continue
-            notices.append(_pull_notice(bridge, dry_run=dry_run))
+            notices.append(
+                _force_refresh_notice(bridge, dry_run=dry_run)
+                if force_repo_refresh
+                else _pull_notice(bridge, dry_run=dry_run)
+            )
             skill_fingerprints_before_pull = _skill_fingerprints(bridge)
             if dry_run:
                 continue
@@ -151,19 +156,24 @@ def materialize_repositories_for_sync(
                     f"repo {bridge.name}: pull_before_sync requires a git repo: {bridge.path}"
                 )
                 continue
-            result = _pull_bridge(bridge)
+            result = (
+                _force_refresh_bridge(bridge)
+                if force_repo_refresh
+                else _pull_bridge(bridge)
+            )
+            skill_change_notices: tuple[str, ...] = ()
             if result.error is not None:
                 errors.append(result.error)
-            elif result.updated:
+            else:
+                skill_change_notices = _skill_inventory_change_notices(
+                    bridge, skill_fingerprints_before_pull
+                )
+            if result.error is None and (result.updated or skill_change_notices):
                 notices.append(
                     f"UPDATED repo {bridge.name}: pulled new source changes; linked skills now use the updated files"
                 )
-                notices.extend(
-                    _skill_inventory_change_notices(
-                        bridge, skill_fingerprints_before_pull
-                    )
-                )
-            else:
+                notices.extend(skill_change_notices)
+            elif result.error is None:
                 notices.append(f"UNCHANGED repo {bridge.name}: already up to date")
 
     return RepositoryMaterialization(
@@ -690,6 +700,44 @@ def _pull_bridge(bridge: BridgeConfig) -> PullResult:
     return PullResult(updated=_pull_output_indicates_update(result))
 
 
+def _force_refresh_bridge(bridge: BridgeConfig) -> PullResult:
+    fetch_command = ["git", "-C", str(bridge.path), "fetch", "--prune"]
+    reset_target = _reset_target(bridge)
+    reset_command = ["git", "-C", str(bridge.path), "reset", "--hard", reset_target]
+    clean_command = ["git", "-C", str(bridge.path), "clean", "-fd"]
+    outputs: list[str] = []
+    for command, label in (
+        (fetch_command, "git fetch --prune"),
+        (reset_command, f"git reset --hard {reset_target}"),
+        (clean_command, "git clean -fd"),
+    ):
+        try:
+            result = subprocess.run(
+                command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except OSError as exc:
+            return PullResult(error=f"repo {bridge.name}: {label} failed to start: {exc}")
+        outputs.append(f"{result.stdout}\n{result.stderr}")
+        if result.returncode != 0:
+            return PullResult(
+                error=(
+                    f"repo {bridge.name}: {label} failed with exit "
+                    f"{result.returncode}: {_command_output(result)}"
+                )
+            )
+    return PullResult(updated=_force_refresh_output_indicates_update(tuple(outputs)))
+
+
+def _reset_target(bridge: BridgeConfig) -> str:
+    if bridge.branch:
+        return f"origin/{bridge.branch}"
+    return "@{upstream}"
+
+
 def _pull_output_indicates_update(result: subprocess.CompletedProcess[str]) -> bool:
     output = f"{result.stdout}\n{result.stderr}".lower()
     unchanged_markers = (
@@ -697,6 +745,18 @@ def _pull_output_indicates_update(result: subprocess.CompletedProcess[str]) -> b
         "already up-to-date",
         "up to date.",
         "up-to-date.",
+    )
+    if any(marker in output for marker in unchanged_markers):
+        return False
+    return bool(output.strip())
+
+
+def _force_refresh_output_indicates_update(outputs: tuple[str, ...]) -> bool:
+    output = "\n".join(outputs).lower()
+    unchanged_markers = (
+        "already up to date",
+        "already up-to-date",
+        "head is now at",
     )
     if any(marker in output for marker in unchanged_markers):
         return False
@@ -796,6 +856,16 @@ def _clone_notice(bridge: BridgeConfig, *, dry_run: bool) -> str:
 def _pull_notice(bridge: BridgeConfig, *, dry_run: bool) -> str:
     verb = "PLAN" if dry_run else "PULL"
     return f"{verb} repo {bridge.name}: git -C {bridge.path} pull --ff-only"
+
+
+def _force_refresh_notice(bridge: BridgeConfig, *, dry_run: bool) -> str:
+    verb = "PLAN" if dry_run else "FORCE"
+    reset_target = _reset_target(bridge)
+    return (
+        f"{verb} repo {bridge.name}: git -C {bridge.path} fetch --prune && "
+        f"git -C {bridge.path} reset --hard {reset_target} && "
+        f"git -C {bridge.path} clean -fd"
+    )
 
 
 def _command_output(result: subprocess.CompletedProcess[str]) -> str:

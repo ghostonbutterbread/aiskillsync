@@ -198,12 +198,14 @@ aiskillsync sync bounty-harness
 aiskillsync sync 1 2
 aiskillsync sync bounty-harness --dest codex --dest claude
 aiskillsync sync all --dry-run
+aiskillsync sync all --overwrite --dry-run
 ```
 
-Future Phase 4 adoption command shape:
+Phase 4 adoption command shape:
 
 ```bash
 aiskillsync sync all --adopt
+aiskillsync sync all --overwrite
 ```
 
 ### `root-context`
@@ -271,13 +273,18 @@ Default behavior:
 - Default sync updates an existing selected enabled repo root when
   `sync.pull_before_sync` is true, but only if the path is a git repo. The
   update command is `git -C <path> pull --ff-only`; a non-zero exit blocks sync.
-- Disabled repos are not cloned or pulled.
+- When `--overwrite` is explicitly passed and `sync.pull_before_sync` is true,
+  repo update uses `git fetch --prune`, `git reset --hard origin/<branch>` when
+  `branch` is configured or `@{upstream}` otherwise, and `git clean -fd`.
+  Any non-zero command blocks sync before destination mutation.
+- Disabled repos are not cloned, pulled, or force-refreshed.
 - Link source skill dirs into destination skill dirs.
 - Sync output ends with a summary of repo action counts
-  (`planned`/`cloned`/`pulled`/`errors`), destination action counts
+  (`planned`/`cloned`/`pulled`/`errors`, plus `forced` when non-zero),
+  destination action counts
   (`linked`/`skipped`/`conflicts`/`errors`/`noops`), and final status
   (`applied`/`dry-run`/`blocked`).
-- TTY output colorizes successful `LINK`/`CLONE`/`PULL` and applied status
+- TTY output colorizes successful `LINK`/`CLONE`/`PULL`/`FORCE` and applied status
   green, `SKIP`/`PLAN` and dry-run status yellow/blue, and
   `ERROR`/`CONFLICT` and blocked status red. Non-TTY output remains plain
   unless `FORCE_COLOR` is set; `NO_COLOR` disables automatic color.
@@ -285,7 +292,7 @@ Default behavior:
 Safety rules:
 
 - Never delete or overwrite unrelated skill names.
-- Never overwrite a non-symlink destination unless `--adopt` or `--backup-differs` is explicitly used.
+- Never overwrite a non-symlink destination unless `--adopt`, `--overwrite`, or `--backup-differs` is explicitly used.
 - If destination is already a correct symlink, skip.
 - If destination is a symlink to another source, report conflict unless adoption is explicit.
 - If destination is a copied dir with matching source `SKILL.md`, it may be replaced with symlink during adoption.
@@ -306,6 +313,8 @@ First-class adoption is available only through explicit migration flags:
 ```bash
 aiskillsync sync codex --repo bounty-harness --skill xss --adopt --dry-run
 aiskillsync sync main --repo bounty-harness --skill xss --adopt
+aiskillsync sync all --overwrite --dry-run
+aiskillsync sync all --overwrite
 ```
 
 Adoption behavior:
@@ -316,6 +325,8 @@ Adoption behavior:
   symlink is created.
 - `--dry-run --adopt` reports the planned backup root and adoption actions but
   does not move or link anything.
+- `--overwrite` includes adoption behavior and also force-refreshes selected
+  git repos from their configured remote when pull-before-sync is enabled.
 - `--skill` limits the operation to selected skill names and should be preferred
   for intentional migrations.
 - `--exclude-skill` and `--denylist <file>` skip local-only/private/experimental
@@ -425,6 +436,7 @@ Implemented Phase 3 scope:
 Deliverables:
 
 - `--adopt`
+- `--overwrite`
 - `--skill`, `--exclude-skill`, `--denylist`
 - `sync.migration_denylist`
 - stable backup root per run

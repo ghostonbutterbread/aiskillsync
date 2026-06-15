@@ -180,7 +180,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "alias for --adopt: back up existing destination copies/conflicts "
-            "and replace them with symlinks to the selected repo skills"
+            "and replace them with symlinks to the selected repo skills; when "
+            "pull_before_sync is enabled, also force-refresh selected git repos "
+            "from their remote before syncing"
         ),
     )
     sync_parser.add_argument(
@@ -548,6 +550,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         request.config,
         request.repo_selectors,
         dry_run=dry_run,
+        force_repo_refresh=args.overwrite_local_copies,
         skip_clone_bridges=frozenset(repo_preflight.skip_clone_bridges),
         skip_pull_bridges=frozenset(repo_preflight.skip_pull_bridges),
     )
@@ -1759,14 +1762,16 @@ def _print_sync_summary(plan: SyncPlan, final_status: str, stdout: TextIO) -> No
 
     print("", file=stdout)
     print("Sync summary:", file=stdout)
-    print(
+    repo_summary = (
         "  repo actions: "
         f"planned={repo_counts['planned']}, "
         f"cloned={repo_counts['cloned']}, "
         f"pulled={repo_counts['pulled']}, "
-        f"errors={repo_counts['errors']}",
-        file=stdout,
+        f"errors={repo_counts['errors']}"
     )
+    if repo_counts["forced"]:
+        repo_summary += f", forced={repo_counts['forced']}"
+    print(repo_summary, file=stdout)
     print(
         "  destination actions: "
         f"linked={destination_counts['linked']}, "
@@ -1789,6 +1794,7 @@ def _repo_summary_counts(plan: SyncPlan) -> dict[str, int]:
         "planned": sum(1 for notice in plan.notices if notice.startswith("PLAN repo ")),
         "cloned": sum(1 for notice in plan.notices if notice.startswith("CLONE repo ")),
         "pulled": sum(1 for notice in plan.notices if notice.startswith("PULL repo ")),
+        "forced": sum(1 for notice in plan.notices if notice.startswith("FORCE repo ")),
         "errors": sum(1 for error in plan.errors if _is_repo_error(error))
         + len(plan.duplicate_skills),
     }
@@ -1828,7 +1834,7 @@ def _is_destination_error(error: str) -> bool:
 
 
 def _colorize_notice(text: str, stdout: TextIO) -> str:
-    if text.startswith(("CLONE repo ", "PULL repo ")):
+    if text.startswith(("CLONE repo ", "PULL repo ", "FORCE repo ")):
         return _colorize(text, "green", stdout)
     if text.startswith("PLAN repo "):
         return _colorize(text, "blue", stdout)
