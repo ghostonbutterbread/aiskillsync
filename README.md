@@ -53,6 +53,7 @@ aiskillsync sync bounty-harness --dest codex --dest claude
 aiskillsync sync 1 2
 aiskillsync sync all --dry-run
 aiskillsync sync codex --repo bounty-harness --skill xss --adopt --dry-run
+aiskillsync sync all --overwrite
 aiskillsync root-context main --repo ai-policies
 aiskillsync root-context codex --repo ai-policies --dry-run
 ```
@@ -91,6 +92,7 @@ explicit-adoption slice of Phase 4 from
 - sync-only repo clone/pull materialization
 - default `sync` creation of missing symlinks only
 - opt-in `sync --adopt` migration with backups, skill filters, and denylists
+- opt-in `sync --overwrite` repo force-refresh plus destination adoption
 - managed Codex/Claude root-context sync from bridge `root-context/` templates
 
 `sync` applies by default. The compatibility `--apply` flag is accepted but no
@@ -100,13 +102,20 @@ and `sync.clone_if_missing` is true, or pull existing selected enabled git
 repo roots when `sync.pull_before_sync` is true. It then creates destination
 symlinks that are missing. Existing correct symlinks are skipped, and existing
 directories, files, or symlinks to unexpected targets are conflicts that block
-the whole apply. It does not delete, adopt, back up, or replace existing
-entries unless `--adopt` is explicitly passed.
+the whole apply. It does not delete, adopt, back up, or replace destination
+entries unless `--adopt` or `--overwrite` is explicitly passed.
 
 `--adopt` is migration mode, not normal sync. It backs up same-name destination
 entries under `~/.cache/aiskillsync-migration/<timestamp>/...` and replaces
 them with symlinks to selected repo skills. Prefer pairing it with
 `--skill <name>` or a denylist so migrations stay focused.
+
+`--overwrite` is the stronger clean-start mode. It includes destination
+adoption behavior and, when `sync.pull_before_sync: true`, force-refreshes
+selected git repos with `git fetch --prune`, `git reset --hard origin/<branch>`
+when a branch is configured or `@{upstream}` otherwise, and `git clean -fd`
+before linking skills. Use `--dry-run --overwrite` first to see exactly which
+repos would be reset.
 
 `add` and `remove` are exposed as repo-first convenience commands and mirror
 `repo add` / `repo remove`.
@@ -270,11 +279,15 @@ Opt-in migration/adoption:
 ```bash
 aiskillsync sync codex --repo bounty-harness --skill xss --adopt --dry-run
 aiskillsync sync codex --repo bounty-harness --skill xss --adopt
+aiskillsync sync all --overwrite --dry-run
+aiskillsync sync all --overwrite
 ```
 
 During adoption, `directory-copy`, `unexpected-symlink`, and same-name path
 conflicts are moved to a timestamped backup root before the canonical symlink
 is created. Without `--adopt`, those entries remain conflicts and block apply.
+`--overwrite` includes this destination adoption behavior and also resets
+selected git repos back to their remote state when pull-before-sync is enabled.
 
 Migration denylists:
 
@@ -292,19 +305,22 @@ Ghost/OpenClaw is not touched unless it is explicitly selected with
 --repo ...`, or included in `sync.default_destinations`.
 
 Only `sync.mode: symlink` is supported. Dry-run never runs git and never
-mutates repo or destination paths; it reports planned `PLAN` clone and pull
-steps. Normal `sync` may run `git clone`, including `--branch <branch>` when
-a repo branch is configured, for missing selected enabled repo roots with a
-repo URL and `sync.clone_if_missing: true`. For existing selected enabled repo
-roots with `sync.pull_before_sync: true`, normal `sync` requires the path to
-be a git repo and runs `git -C <path> pull --ff-only`; any non-zero pull
-blocks the sync before symlink creation. Disabled repos are never cloned or
-pulled.
+mutates repo or destination paths; it reports planned `PLAN` clone, pull, or
+force-refresh steps. Normal `sync` may run `git clone`, including
+`--branch <branch>` when a repo branch is configured, for missing selected
+enabled repo roots with a repo URL and `sync.clone_if_missing: true`. For
+existing selected enabled repo roots with `sync.pull_before_sync: true`, normal
+sync requires the path to be a git repo and runs `git -C <path> pull
+--ff-only`; any non-zero pull blocks the sync before symlink creation.
+With `--overwrite`, that pull is replaced by `fetch --prune`, `reset --hard`,
+and `clean -fd`; any non-zero command blocks the sync before symlink creation.
+Disabled repos are never cloned, pulled, or force-refreshed.
 
 Sync output ends with a concise summary of repo actions, destination actions,
 and final status (`applied`, `dry-run`, or `blocked`). Terminal output colors
-successful `LINK`/`CLONE`/`PULL` and applied status green, `SKIP`/`PLAN` and
-dry-run status yellow/blue, and `ERROR`/`CONFLICT` and blocked status red.
+successful `LINK`/`CLONE`/`PULL`/`FORCE` and applied status green,
+`SKIP`/`PLAN` and dry-run status yellow/blue, and `ERROR`/`CONFLICT` and
+blocked status red.
 Captured non-TTY output stays plain unless color is forced with `FORCE_COLOR`;
 set `NO_COLOR` to disable automatic color.
 
