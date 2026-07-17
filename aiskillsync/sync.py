@@ -137,6 +137,12 @@ def materialize_repositories_for_sync(
         if not bridge.path.is_dir():
             continue
 
+        if not force_repo_refresh:
+            branch_error = configured_branch_error(bridge)
+            if branch_error is not None:
+                errors.append(branch_error)
+                continue
+
         if config.sync.pull_before_sync:
             if bridge.name in skip_pull_bridges:
                 notices.append(
@@ -652,6 +658,27 @@ def _canonical_path(path: Path) -> Path:
         return path.resolve(strict=False)
     except OSError:
         return path.absolute()
+
+
+def configured_branch_error(bridge: BridgeConfig) -> str | None:
+    """Return an error when a branch-pinned bridge is not on its configured branch."""
+    if bridge.branch is None:
+        return None
+    if not _is_git_repo_root(bridge.path):
+        return f"repo {bridge.name}: configured branch {bridge.branch!r} requires a git checkout: {bridge.path}"
+    result = subprocess.run(
+        ["git", "-C", str(bridge.path), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return f"repo {bridge.name}: configured branch {bridge.branch!r} but checkout is detached"
+    actual = result.stdout.strip()
+    if actual != bridge.branch:
+        return f"repo {bridge.name}: configured branch {bridge.branch!r} but checked out {actual!r}"
+    return None
 
 
 def _clone_bridge(bridge: BridgeConfig) -> str | None:

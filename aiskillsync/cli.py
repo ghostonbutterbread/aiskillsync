@@ -39,6 +39,7 @@ from .discovery import (
     discover_bridges,
     enabled_skills,
 )
+from .lanes import effective_config, load_active_lanes, resolve_switch, save_active_lane
 from .sync import (
     SyncAction,
     SyncPlan,
@@ -207,6 +208,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="apply sync changes (accepted for compatibility; sync applies by default)",
     )
     sync_parser.set_defaults(func=cmd_sync)
+
+    switch_parser = subparsers.add_parser(
+        "switch",
+        help="activate a configured stable/beta lane and reconcile its skill links",
+    )
+    switch_parser.add_argument("terms", nargs="+", help="<lane> or <group> <lane>")
+    switch_parser.add_argument(
+        "--dest", action="append", default=[], help="destination name to switch; repeat for multiple destinations"
+    )
+    switch_parser.add_argument("--dry-run", action="store_true", help="preview the lane switch without changes")
+    switch_parser.add_argument("-v", "--verbose", action="count", default=0, help="increase sync output detail")
+    switch_parser.set_defaults(func=cmd_switch)
 
     root_parser = subparsers.add_parser(
         "root-context",
@@ -525,8 +538,111 @@ def cmd_repo_remove(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) ->
     return 0
 
 
+def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    """Select one configured lane, sync it, then persist selection on success."""
+    configured = _load_config(args)
+    group, lane = resolve_switch(configured, tuple(args.terms))
+    active_before = load_active_lanes(configured)
+    group_config = next(item for item in configured.lanes if item.name == group)
+    old_bridge_name = group_config.variants[active_before[group]]
+    new_bridge_name = group_config.variants[lane]
+    old_bridge = next(item for item in configured.bridges if item.name == old_bridge_name)
+    new_config = effective_config(configured, {group: lane})
+    new_bridge = next(item for item in new_config.bridges if item.name == new_bridge_name)
+    destinations = tuple(args.dest) or configured.sync.default_destinations
+    _ensure_switch_collisions_safe(old_bridge.skills_dir, new_bridge.skills_dir, destinations, configured)
+    stale = _lane_stale_links(old_bridge.skills_dir, new_bridge.skills_dir, destinations, configured)
+    sync_args = argparse.Namespace(
+        config=args.config,
+        terms=("all",),
+        repo=[],
+        dest=args.dest,
+        skill=[],
+        exclude_skill=[],
+        denylist=[],
+        adopt=True,
+        overwrite_local_copies=False,
+        dry_run=args.dry_run,
+        apply=False,
+        verbose=args.verbose,
+        lane_overrides={group: lane},
+    )
+    print(f"Switching {group} to lane {lane}", file=stdout)
+    if stale:
+        print("Stale lane symlinks:", file=stdout)
+        for path in stale:
+            print(f"  PRUNE {path}", file=stdout)
+    result = cmd_sync(sync_args, stdout, stderr)
+    if result == 0 and not args.dry_run:
+        for path in stale:
+            path.unlink()
+        if stale:
+            print("Removed stale lane symlinks:", file=stdout)
+            for path in stale:
+                print(f"  {path}", file=stdout)
+        save_active_lane(configured, group, lane)
+        print(f"Active lane saved: {group}={lane}", file=stdout)
+    return result
+
+
+def _ensure_switch_collisions_safe(
+    old_root: Path, new_root: Path, destinations: tuple[str, ...], configured: Config
+) -> None:
+    """Reject a switch before it could replace an unmanaged destination entry."""
+    old_root = old_root.resolve(strict=False)
+    new_root = new_root.resolve(strict=False)
+    if not new_root.is_dir():
+        return
+    for destination in destinations:
+        root = configured.ai_skill_paths.get(destination)
+        if root is None or not root.is_dir():
+            continue
+        for skill in new_root.iterdir():
+            if not skill.is_dir() or not (skill / "SKILL.md").is_file():
+                continue
+            entry = root / skill.name
+            if not (entry.exists() or entry.is_symlink()):
+                continue
+            if not entry.is_symlink():
+                raise ConfigError(
+                    f"switch would replace unmanaged destination entry: {destination}:{skill.name}"
+                )
+            target = entry.resolve(strict=False)
+            if not (target.is_relative_to(old_root) or target.is_relative_to(new_root)):
+                raise ConfigError(
+                    f"switch would replace unmanaged destination symlink: {destination}:{skill.name}"
+                )
+
+
+def _lane_stale_links(
+    old_root: Path, new_root: Path, destinations: tuple[str, ...], configured: Config
+) -> tuple[Path, ...]:
+    """Identify only links owned by the prior lane that vanished from the next lane."""
+    if old_root == new_root:
+        return ()
+    old_root = old_root.resolve(strict=False)
+    new_names = {
+        item.name
+        for item in new_root.iterdir()
+        if item.is_dir() and (item / "SKILL.md").is_file()
+    } if new_root.is_dir() else set()
+    stale: list[Path] = []
+    for destination in destinations:
+        root = configured.ai_skill_paths.get(destination)
+        if root is None or not root.is_dir():
+            continue
+        for entry in root.iterdir():
+            if not entry.is_symlink() or entry.name in new_names:
+                continue
+            target = entry.resolve(strict=False)
+            if target.is_relative_to(old_root):
+                stale.append(entry)
+    return tuple(stale)
+
+
 def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
-    config = _load_config(args)
+    configured = _load_config(args)
+    config = effective_config(configured, getattr(args, "lane_overrides", None))
     if config.sync.mode != "symlink":
         print(
             f"aiskillsync: unsupported sync.mode {config.sync.mode!r}; only 'symlink' is supported",
@@ -1863,4 +1979,13 @@ def _should_color(stdout: TextIO) -> bool:
     if "NO_COLOR" in os.environ:
         return False
     isatty = getattr(stdout, "isatty", None)
-    return bool(isatty and isatty())
+    if not (isatty and isatty()):
+        return False
+    # Test doubles and in-memory streams can claim TTY status but cannot render
+    # terminal control sequences. Require an actual file descriptor unless the
+    # caller explicitly requested color through FORCE_COLOR.
+    try:
+        stdout.fileno()
+    except (AttributeError, OSError):
+        return False
+    return True

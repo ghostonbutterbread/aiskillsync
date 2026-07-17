@@ -64,6 +64,15 @@ class BridgeConfig:
 
 
 @dataclass(frozen=True)
+class LaneGroupConfig:
+    """Named alternatives for one family of mutually-exclusive skill sources."""
+
+    name: str
+    default: str
+    variants: dict[str, str]
+
+
+@dataclass(frozen=True)
 class SyncConfig:
     mode: str = "symlink"
     pull_before_sync: bool = True
@@ -77,6 +86,7 @@ class Config:
     path: Path
     repo_dir: Path = field(default_factory=lambda: expand_path(DEFAULT_REPO_DIR))
     bridges: tuple[BridgeConfig, ...] = field(default_factory=tuple)
+    lanes: tuple[LaneGroupConfig, ...] = field(default_factory=tuple)
     ai_skill_paths: dict[str, Path] = field(default_factory=dict)
     sync: SyncConfig = field(default_factory=SyncConfig)
 
@@ -183,6 +193,39 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             )
         )
 
+    lanes_raw = raw.get("lanes", {})
+    if lanes_raw is None:
+        lanes_raw = {}
+    if not isinstance(lanes_raw, dict):
+        raise ConfigError("lanes must be a mapping")
+    bridge_names = {bridge.name for bridge in bridges}
+    lanes: list[LaneGroupConfig] = []
+    claimed_lane_bridges: set[str] = set()
+    for group_name, group_raw in lanes_raw.items():
+        if not isinstance(group_name, str) or not group_name:
+            raise ConfigError("lane group names must be non-empty strings")
+        if not isinstance(group_raw, dict):
+            raise ConfigError(f"lanes.{group_name} must be a mapping")
+        default = require_string(group_raw, "default", f"lanes.{group_name}")
+        variants = group_raw.get("variants")
+        if not isinstance(variants, dict) or not variants:
+            raise ConfigError(f"lanes.{group_name}.variants must be a non-empty mapping")
+        normalized_variants: dict[str, str] = {}
+        for lane_name, bridge_name in variants.items():
+            if not isinstance(lane_name, str) or not lane_name:
+                raise ConfigError(f"lanes.{group_name}.variants keys must be non-empty strings")
+            if not isinstance(bridge_name, str) or not bridge_name:
+                raise ConfigError(f"lanes.{group_name}.variants.{lane_name} must name a bridge")
+            if bridge_name not in bridge_names:
+                raise ConfigError(f"lanes.{group_name}.variants.{lane_name} names unknown bridge: {bridge_name}")
+            if bridge_name in claimed_lane_bridges:
+                raise ConfigError(f"bridge {bridge_name} belongs to more than one lane group")
+            claimed_lane_bridges.add(bridge_name)
+            normalized_variants[lane_name] = bridge_name
+        if default not in normalized_variants:
+            raise ConfigError(f"lanes.{group_name}.default must name a configured variant")
+        lanes.append(LaneGroupConfig(group_name, default, normalized_variants))
+
     destinations_raw = raw.get("ai_skill_paths", {})
     if destinations_raw is None:
         destinations_raw = {}
@@ -226,6 +269,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         path=path,
         repo_dir=expand_path(repo_dir_raw),
         bridges=tuple(bridges),
+        lanes=tuple(lanes),
         ai_skill_paths=destinations,
         sync=SyncConfig(
             mode=mode,
@@ -255,6 +299,15 @@ def config_to_text(config: Config) -> str:
             lines.append(f"    enabled: {str(bridge.enabled).lower()}")
     else:
         lines.append("bridges: []")
+
+    if config.lanes:
+        lines.extend(("", "lanes:"))
+        for group in config.lanes:
+            lines.append(f"  {group.name}:")
+            lines.append(f"    default: {_format_scalar(group.default)}")
+            lines.append("    variants:")
+            for lane_name, bridge_name in sorted(group.variants.items()):
+                lines.append(f"      {lane_name}: {_format_scalar(bridge_name)}")
 
     lines.append("")
     lines.append("ai_skill_paths:")

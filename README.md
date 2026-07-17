@@ -201,6 +201,53 @@ aiskillsync remove ai-skills
 aiskillsync repo remove https://github.com/org/ai-skills.git
 ```
 
+## Policy Lanes: stable and beta
+
+A **bridge** is one checked-out skill source. For a repository that needs a
+stable and beta policy lane, configure two bridges at separate worktree or
+clone paths, then place them in one mutually-exclusive lane group:
+
+```yaml
+bridges:
+  - name: ai-policies-stable
+    repo: https://github.com/example/ai-policies.git
+    path: ~/projects/ai-policies-stable
+    branch: main
+    skills_path: skills
+    enabled: true
+  - name: ai-policies-beta
+    repo: https://github.com/example/ai-policies.git
+    path: ~/projects/ai-policies-beta
+    branch: beta/policies
+    skills_path: skills
+    enabled: true
+
+lanes:
+  policies:
+    default: stable
+    variants:
+      stable: ai-policies-stable
+      beta: ai-policies-beta
+```
+
+Only the active bridge for each lane group participates in normal `sync`.
+Repositories outside `lanes` retain the ordinary configured-branch behavior.
+A branch-configured bridge must be checked out on its configured branch before
+sync can pull, discover, or link skills; a mismatch blocks the run.
+
+Switch the active selection and reconcile its destination symlinks with:
+
+```bash
+aiskillsync switch beta --dry-run      # when exactly one lane group exists
+aiskillsync switch beta
+aiskillsync switch policies stable     # named group form
+```
+
+The selected lane is recorded in `lanes-state.json` next to the config. A
+switch repoints shared skill names, and removes only stale symlinks that still
+point under the previously active lane source. It never deletes ordinary
+folders, local skill copies, or symlinks outside that prior lane source.
+
 ## Sync Command
 
 `sync` now prefers destination-first arguments. Destination groups are:
