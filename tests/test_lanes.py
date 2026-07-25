@@ -60,6 +60,18 @@ sync:
         )
         return config
 
+    def test_doctor_uses_active_lane_without_duplicate_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            self.write_skill(base / "stable", "shared")
+            self.write_skill(base / "beta", "shared")
+            self.init_repo(base / "stable", "main")
+            self.init_repo(base / "beta", "beta")
+            (base / "destination").mkdir()
+            config = self.write_config(base)
+
+            self.assertEqual(main(["--config", str(config), "doctor"]), 0)
+
     def test_switch_repoints_shared_and_prunes_removed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

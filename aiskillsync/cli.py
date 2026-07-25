@@ -445,7 +445,8 @@ def cmd_doctor(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     try:
         text = config_path.read_text(encoding="utf-8")
         raw = parse_simple_yaml(text)
-        config = config_from_mapping(raw, config_path)
+        configured = config_from_mapping(raw, config_path)
+        config = effective_config(configured)
     except (OSError, ConfigError) as exc:
         print(f"FAIL config parses: {exc}", file=stdout)
         return 1
