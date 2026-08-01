@@ -35,6 +35,7 @@ sync:
   mode: symlink
   pull_before_sync: true
   clone_if_missing: true
+  materialization_workers: 3
   default_destinations:
     - codex
     - claude
@@ -77,6 +78,7 @@ class SyncConfig:
     mode: str = "symlink"
     pull_before_sync: bool = True
     clone_if_missing: bool = True
+    materialization_workers: int = 3
     default_destinations: tuple[str, ...] = ("codex", "claude")
     migration_denylist: tuple[str, ...] = ()
 
@@ -264,6 +266,15 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         raise ConfigError("sync.pull_before_sync must be true or false")
     if not isinstance(clone_if_missing, bool):
         raise ConfigError("sync.clone_if_missing must be true or false")
+    materialization_workers_raw = sync_raw.get("materialization_workers", 3)
+    if isinstance(materialization_workers_raw, str) and materialization_workers_raw.isdecimal():
+        materialization_workers = int(materialization_workers_raw)
+    else:
+        materialization_workers = materialization_workers_raw
+    if not isinstance(materialization_workers, int) or isinstance(materialization_workers, bool):
+        raise ConfigError("sync.materialization_workers must be a positive integer")
+    if materialization_workers < 1:
+        raise ConfigError("sync.materialization_workers must be a positive integer")
 
     return Config(
         path=path,
@@ -275,6 +286,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             mode=mode,
             pull_before_sync=pull_before_sync,
             clone_if_missing=clone_if_missing,
+            materialization_workers=materialization_workers,
             default_destinations=tuple(default_destinations_raw),
             migration_denylist=tuple(migration_denylist_raw),
         ),
@@ -319,6 +331,7 @@ def config_to_text(config: Config) -> str:
     lines.append(f"  mode: {_format_scalar(config.sync.mode)}")
     lines.append(f"  pull_before_sync: {str(config.sync.pull_before_sync).lower()}")
     lines.append(f"  clone_if_missing: {str(config.sync.clone_if_missing).lower()}")
+    lines.append(f"  materialization_workers: {config.sync.materialization_workers}")
     lines.append("  default_destinations:")
     for destination in config.sync.default_destinations:
         lines.append(f"    - {_format_scalar(destination)}")

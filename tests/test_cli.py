@@ -85,6 +85,8 @@ if len(args) == 4 and args[0] == "-C" and args[2:] == ["pull", "--ff-only"]:
         skill_dir = pathlib.Path(args[1]) / "skills" / modified_skill
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text("modified during pull", encoding="utf-8")
+    if not exit_code and pull_output not in {"Already up to date.", "Already up-to-date."}:
+        (pathlib.Path(args[1]) / ".fake_git_head").write_text("after", encoding="utf-8")
     sys.exit(exit_code)
 
 if len(args) == 4 and args[0] == "-C" and args[2:] == ["fetch", "--prune"]:
@@ -113,6 +115,7 @@ if len(args) == 5 and args[0] == "-C" and args[2:4] == ["reset", "--hard"]:
         skill_dir = pathlib.Path(args[1]) / "skills" / modified_skill
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text("modified during reset", encoding="utf-8")
+    (pathlib.Path(args[1]) / ".fake_git_head").write_text("after", encoding="utf-8")
     sys.exit(exit_code)
 
 if len(args) == 4 and args[0] == "-C" and args[2:] == ["clean", "-fd"]:
@@ -132,6 +135,23 @@ if len(args) == 4 and args[0] == "-C" and args[2:] == ["clean", "-fd"]:
 
 if len(args) == 4 and args[0] == "-C" and args[2:] == ["rev-parse", "--is-inside-work-tree"]:
     print("true")
+    sys.exit(0)
+
+if len(args) == 4 and args[0] == "-C" and args[2:] == ["rev-parse", "HEAD"]:
+    marker = pathlib.Path(args[1]) / ".fake_git_head"
+    print("after" if marker.exists() else "before")
+    sys.exit(0)
+
+if len(args) == 8 and args[0] == "-C" and args[2:5] == ["diff", "--name-status", "before"]:
+    created_skill = os.environ.get("AISKILLSYNC_FAKE_GIT_PULL_CREATE_SKILL") or os.environ.get("AISKILLSYNC_FAKE_GIT_RESET_CREATE_SKILL")
+    modified_skill = os.environ.get("AISKILLSYNC_FAKE_GIT_PULL_MODIFY_SKILL") or os.environ.get("AISKILLSYNC_FAKE_GIT_RESET_MODIFY_SKILL")
+    removed_skill = os.environ.get("AISKILLSYNC_FAKE_GIT_CLEAN_REMOVE_SKILL")
+    if created_skill:
+        print(f"A\\tskills/{created_skill}/SKILL.md")
+    if modified_skill:
+        print(f"M\\tskills/{modified_skill}/SKILL.md")
+    if removed_skill:
+        print(f"D\\tskills/{removed_skill}/SKILL.md")
     sys.exit(0)
 
 print("unsupported fake git invocation: " + " ".join(args), file=sys.stderr)
