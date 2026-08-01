@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import shutil
-import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -90,6 +90,13 @@ class PullResult:
 
 
 @dataclass(frozen=True)
+class GitSkillChanges:
+    added: tuple[str, ...] = ()
+    updated: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ApplyResult:
     created: tuple[str, ...] = ()
     pruned: tuple[str, ...] = ()
@@ -110,83 +117,106 @@ def materialize_repositories_for_sync(
     if selection_errors:
         return RepositoryMaterialization()
 
+    groups_by_root: dict[Path, list[BridgeConfig]] = {}
+    groups: list[list[BridgeConfig]] = []
+    for bridge in selected:
+        root = _canonical_path(bridge.path)
+        if root not in groups_by_root:
+            groups_by_root[root] = []
+            groups.append(groups_by_root[root])
+        groups_by_root[root].append(bridge)
+
+    def materialize_group(group: list[BridgeConfig]) -> tuple[RepositoryMaterialization, ...]:
+        return tuple(
+            _materialize_bridge(
+                config,
+                bridge,
+                dry_run=dry_run,
+                force_repo_refresh=force_repo_refresh,
+                skip_clone=bridge.name in skip_clone_bridges,
+                skip_pull=bridge.name in skip_pull_bridges,
+            )
+            for bridge in group
+        )
+
+    worker_count = min(config.sync.materialization_workers, len(groups))
+    if worker_count <= 1:
+        grouped_results = [materialize_group(group) for group in groups]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(materialize_group, group) for group in groups]
+            grouped_results = [future.result() for future in futures]
+
     notices: list[str] = []
     errors: list[str] = []
     skipped_missing_roots: list[str] = []
-    for bridge in selected:
-        if not bridge.enabled:
-            continue
+    for group_results in grouped_results:
+        for result in group_results:
+            notices.extend(result.notices)
+            errors.extend(result.errors)
+            skipped_missing_roots.extend(result.skipped_missing_roots)
+    return RepositoryMaterialization(tuple(notices), tuple(errors), tuple(skipped_missing_roots))
 
-        root_exists = bridge.path.exists()
-        if not root_exists:
-            if bridge.repo and config.sync.clone_if_missing:
-                if bridge.name in skip_clone_bridges:
-                    notices.append(
-                        f"SKIP repo {bridge.name}: clone skipped because GitHub auth was not confirmed"
-                    )
-                    skipped_missing_roots.append(bridge.name)
-                    continue
-                notices.append(_clone_notice(bridge, dry_run=dry_run))
-                if not dry_run:
-                    error = _clone_bridge(bridge)
-                    if error is not None:
-                        errors.append(error)
-                continue
-            continue
 
-        if not bridge.path.is_dir():
-            continue
-
-        if not force_repo_refresh:
-            branch_error = configured_branch_error(bridge)
-            if branch_error is not None:
-                errors.append(branch_error)
-                continue
-
-        if config.sync.pull_before_sync:
-            if bridge.name in skip_pull_bridges:
-                notices.append(
-                    f"SKIP repo {bridge.name}: pull skipped because GitHub auth was not confirmed"
-                )
-                continue
-            notices.append(
-                _force_refresh_notice(bridge, dry_run=dry_run)
-                if force_repo_refresh
-                else _pull_notice(bridge, dry_run=dry_run)
+def _materialize_bridge(
+    config: Config,
+    bridge: BridgeConfig,
+    *,
+    dry_run: bool,
+    force_repo_refresh: bool,
+    skip_clone: bool,
+    skip_pull: bool,
+) -> RepositoryMaterialization:
+    if not bridge.enabled:
+        return RepositoryMaterialization()
+    if not bridge.path.exists():
+        if not bridge.repo or not config.sync.clone_if_missing:
+            return RepositoryMaterialization()
+        if skip_clone:
+            return RepositoryMaterialization(
+                notices=(f"SKIP repo {bridge.name}: clone skipped because GitHub auth was not confirmed",),
+                skipped_missing_roots=(bridge.name,),
             )
-            skill_fingerprints_before_pull = _skill_fingerprints(bridge)
-            if dry_run:
-                continue
-            if not _is_git_repo_root(bridge.path):
-                errors.append(
-                    f"repo {bridge.name}: pull_before_sync requires a git repo: {bridge.path}"
-                )
-                continue
-            result = (
-                _force_refresh_bridge(bridge)
-                if force_repo_refresh
-                else _pull_bridge(bridge)
-            )
-            skill_change_notices: tuple[str, ...] = ()
-            if result.error is not None:
-                errors.append(result.error)
-            else:
-                skill_change_notices = _skill_inventory_change_notices(
-                    bridge, skill_fingerprints_before_pull
-                )
-            if result.error is None and (result.updated or skill_change_notices):
-                notices.append(
-                    f"UPDATED repo {bridge.name}: pulled new source changes; linked skills now use the updated files"
-                )
-                notices.extend(skill_change_notices)
-            elif result.error is None:
-                notices.append(f"UNCHANGED repo {bridge.name}: already up to date")
-
-    return RepositoryMaterialization(
-        notices=tuple(notices),
-        errors=tuple(errors),
-        skipped_missing_roots=tuple(skipped_missing_roots),
-    )
+        error = None if dry_run else _clone_bridge(bridge)
+        return RepositoryMaterialization(
+            notices=(_clone_notice(bridge, dry_run=dry_run),),
+            errors=(error,) if error is not None else (),
+        )
+    if not bridge.path.is_dir():
+        return RepositoryMaterialization()
+    if not force_repo_refresh:
+        branch_error = configured_branch_error(bridge)
+        if branch_error is not None:
+            return RepositoryMaterialization(errors=(branch_error,))
+    if not config.sync.pull_before_sync:
+        return RepositoryMaterialization()
+    if skip_pull:
+        return RepositoryMaterialization(
+            notices=(f"SKIP repo {bridge.name}: pull skipped because GitHub auth was not confirmed",)
+        )
+    notice = _force_refresh_notice(bridge, dry_run=dry_run) if force_repo_refresh else _pull_notice(bridge, dry_run=dry_run)
+    if dry_run:
+        return RepositoryMaterialization(notices=(notice,))
+    if not _is_git_repo_root(bridge.path):
+        return RepositoryMaterialization(
+            notices=(notice,),
+            errors=(f"repo {bridge.name}: pull_before_sync requires a git repo: {bridge.path}",),
+        )
+    before = _git_revision(bridge.path)
+    result = _force_refresh_bridge(bridge) if force_repo_refresh else _pull_bridge(bridge)
+    if result.error is not None:
+        return RepositoryMaterialization(notices=(notice,), errors=(result.error,))
+    after = _git_revision(bridge.path)
+    changed = result.updated if before is None or after is None else before != after
+    if not changed:
+        return RepositoryMaterialization(
+            notices=(notice, f"UNCHANGED repo {bridge.name}: already up to date")
+        )
+    notices = [notice]
+    if before is not None and after is not None:
+        notices.extend(_skill_change_notices(bridge, git_changed_skill_names(bridge, before, after)))
+    notices.append(f"UPDATED repo {bridge.name}: pulled new source changes; linked skills now use the updated files")
+    return RepositoryMaterialization(notices=tuple(notices))
 
 
 def build_sync_plan(
@@ -790,69 +820,65 @@ def _force_refresh_output_indicates_update(outputs: tuple[str, ...]) -> bool:
     return bool(output.strip())
 
 
-def _skill_inventory_change_notices(
-    bridge: BridgeConfig, skill_fingerprints_before_pull: dict[str, str]
-) -> tuple[str, ...]:
-    skill_fingerprints_after_pull = _skill_fingerprints(bridge)
-    skills_before_pull = frozenset(skill_fingerprints_before_pull)
-    skills_after_pull = frozenset(skill_fingerprints_after_pull)
-    added = sorted(skills_after_pull - skills_before_pull)
-    removed = sorted(skills_before_pull - skills_after_pull)
-    updated = sorted(
-        name
-        for name in skills_before_pull & skills_after_pull
-        if skill_fingerprints_before_pull[name] != skill_fingerprints_after_pull[name]
-    )
+def _skill_change_notices(bridge: BridgeConfig, changes: GitSkillChanges) -> tuple[str, ...]:
     notices: list[str] = []
-    if added:
-        notices.append(f"ADDED skills in repo {bridge.name}: {', '.join(added)}")
-    if updated:
-        notices.append(f"UPDATED skills in repo {bridge.name}: {', '.join(updated)}")
-    if removed:
-        notices.append(f"REMOVED skills in repo {bridge.name}: {', '.join(removed)}")
+    if changes.added:
+        notices.append(f"ADDED skills in repo {bridge.name}: {', '.join(changes.added)}")
+    if changes.updated:
+        notices.append(f"UPDATED skills in repo {bridge.name}: {', '.join(changes.updated)}")
+    if changes.removed:
+        notices.append(f"REMOVED skills in repo {bridge.name}: {', '.join(changes.removed)}")
     return tuple(notices)
 
 
-def _skill_names(bridge: BridgeConfig) -> frozenset[str]:
-    skills_dir = bridge.skills_dir
-    if not skills_dir.is_dir():
-        return frozenset()
-    return frozenset(
-        child.name
-        for child in skills_dir.iterdir()
-        if child.is_dir() and (child / "SKILL.md").is_file()
+def git_changed_skill_names(bridge: BridgeConfig, before: str, after: str) -> GitSkillChanges:
+    """Classify top-level skill changes from Git paths without recursively hashing content."""
+    result = subprocess.run(
+        ["git", "-C", str(bridge.path), "diff", "--name-status", before, after, "--", bridge.skills_path],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
-
-
-def _skill_fingerprints(bridge: BridgeConfig) -> dict[str, str]:
-    skills_dir = bridge.skills_dir
-    if not skills_dir.is_dir():
-        return {}
-    fingerprints: dict[str, str] = {}
-    for child in skills_dir.iterdir():
-        if child.is_dir() and (child / "SKILL.md").is_file():
-            fingerprints[child.name] = _directory_fingerprint(child)
-    return fingerprints
-
-
-def _directory_fingerprint(path: Path) -> str:
-    digest = hashlib.sha256()
-    for item in sorted(path.rglob("*")):
-        if item.is_symlink():
+    if result.returncode != 0:
+        return GitSkillChanges()
+    added: set[str] = set()
+    updated: set[str] = set()
+    removed: set[str] = set()
+    prefix = f"{Path(bridge.skills_path).as_posix().rstrip('/')}/"
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
             continue
-        relative = item.relative_to(path).as_posix()
-        if item.is_dir():
-            digest.update(f"dir:{relative}\0".encode("utf-8"))
-            continue
-        if not item.is_file():
-            continue
-        digest.update(f"file:{relative}\0".encode("utf-8"))
-        try:
-            digest.update(item.read_bytes())
-        except OSError:
-            digest.update(b"<unreadable>")
-        digest.update(b"\0")
-    return digest.hexdigest()
+        status, paths = fields[0], fields[1:]
+        for path in paths:
+            if not path.startswith(prefix):
+                continue
+            name = path[len(prefix):].split("/", 1)[0]
+            if not name:
+                continue
+            if status.startswith("A"):
+                added.add(name)
+            elif status.startswith("D"):
+                removed.add(name)
+            else:
+                updated.add(name)
+    updated.difference_update(added | removed)
+    return GitSkillChanges(tuple(sorted(added)), tuple(sorted(updated)), tuple(sorted(removed)))
+
+
+def _git_revision(path: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    revision = result.stdout.strip()
+    return revision or None
 
 
 def _is_git_repo_root(path: Path) -> bool:

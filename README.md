@@ -98,12 +98,18 @@ explicit-adoption slice of Phase 4 from
 `sync` applies by default. The compatibility `--apply` flag is accepted but no
 longer required. Apply is intentionally narrow in Phase 3: it may first clone
 missing selected enabled repo roots when `repo` exists
-and `sync.clone_if_missing` is true, or pull existing selected enabled git
-repo roots when `sync.pull_before_sync` is true. It then creates destination
-symlinks that are missing. Existing correct symlinks are skipped, and existing
+and `sync.clone_if_missing` is true, or refresh existing selected enabled git
+repo roots when `sync.pull_before_sync` is true. Independent checkout roots are
+materialized concurrently (three workers by default); bridges sharing a checkout
+remain serialized. Once every selected source is ready, the resulting inventory
+is planned once and fanned out to the requested destinations. It then creates
+destination symlinks that are missing. Existing correct symlinks are skipped, and existing
 directories, files, or symlinks to unexpected targets are conflicts that block
 the whole apply. It does not delete, adopt, back up, or replace destination
-entries unless `--adopt` or `--overwrite` is explicitly passed.
+entries unless `--adopt` or `--overwrite` is explicitly passed. When a Git
+refresh changes a source revision, aiskillsync uses `git diff --name-status`
+under that bridge's `skills_path` to report changed skills; it does not walk and
+hash every skill file.
 
 `--adopt` is migration mode, not normal sync. It backs up same-name destination
 entries under `~/.cache/aiskillsync-migration/<timestamp>/...` and replaces
@@ -150,6 +156,7 @@ sync:
   mode: symlink
   pull_before_sync: true
   clone_if_missing: true
+  materialization_workers: 3
   default_destinations:
     - codex
     - claude
