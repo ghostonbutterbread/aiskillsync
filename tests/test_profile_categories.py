@@ -148,6 +148,151 @@ class ProfileCategoryTests(unittest.TestCase):
                     base / "config.yaml",
                 )
 
+    def test_profile_group_fans_out_selected_sources_to_every_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "general"
+            for category, name in (("security", "xss"), ("career", "job-search")):
+                skill = bridge / "skills" / category / name
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(name, encoding="utf-8")
+            destinations = {name: base / name for name in ("claude", "codex", "hermes-security")}
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: general
+    path: {bridge}
+    skill_layout: categorized
+ai_skill_paths:
+  claude: {destinations['claude']}
+  codex: {destinations['codex']}
+  hermes-security: {destinations['hermes-security']}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+profile_sets:
+  security:
+    destinations: [claude, codex, hermes-security]
+    sources:
+      - bridge: general
+        include_categories: [security]
+""",
+                encoding="utf-8",
+            )
+
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = main(["--config", str(config), "sync", "all"])
+            profile_stdout, profile_stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(profile_stdout), contextlib.redirect_stderr(profile_stderr):
+                profile_result = main(["--config", str(config), "sync", "--profile", "security", "--dry-run"])
+            linked = {
+                destination: {name: (root / name).is_symlink() for name in ("xss", "job-search")}
+                for destination, root in destinations.items()
+            }
+
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertEqual(profile_result, 0, profile_stderr.getvalue())
+        self.assertIn("Destinations: claude, codex, hermes-security", profile_stdout.getvalue())
+        self.assertEqual(
+            linked,
+            {name: {"xss": True, "job-search": False} for name in destinations},
+        )
+
+    def test_legacy_singular_profile_destination_remains_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = config_from_mapping(
+                {
+                    "bridges": [{"name": "general", "path": str(base / "general")}],
+                    "ai_skill_paths": {"codex": str(base / "codex")},
+                    "profile_sets": {
+                        "legacy": {"destination": "codex", "sources": [{"bridge": "general"}]}
+                    },
+                },
+                base / "config.yaml",
+            )
+
+        self.assertEqual(config.profile_sets[0].destinations, ("codex",))
+        self.assertIn("destinations:", config_to_text(config))
+        self.assertNotIn("    destination:", config_to_text(config))
+
+    def test_profile_groups_reject_duplicate_destination_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with self.assertRaisesRegex(ConfigError, "assigned by more than one profile set: codex"):
+                config_from_mapping(
+                    {
+                        "bridges": [{"name": "general", "path": str(base / "general")}],
+                        "ai_skill_paths": {"codex": str(base / "codex"), "claude": str(base / "claude")},
+                        "profile_sets": {
+                            "security": {
+                                "destinations": ["codex", "claude"],
+                                "sources": [{"bridge": "general"}],
+                            },
+                            "coding": {"destination": "codex", "sources": [{"bridge": "general"}]},
+                        },
+                    },
+                    base / "config.yaml",
+                )
+
+    def test_profile_groups_validate_plural_destination_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            base_config = {
+                "bridges": [{"name": "general", "path": str(base / "general")}],
+                "ai_skill_paths": {"codex": str(base / "codex")},
+            }
+            invalid_profiles = (
+                (
+                    {"destination": "codex", "destinations": ["codex"], "sources": [{"bridge": "general"}]},
+                    "cannot supply both",
+                ),
+                ({"sources": [{"bridge": "general"}]}, "must supply destination or destinations"),
+                ({"destinations": ["missing"], "sources": [{"bridge": "general"}]}, "unknown destination: missing"),
+                ({"destinations": ["codex", "codex"], "sources": [{"bridge": "general"}]}, "duplicate destination names"),
+            )
+
+            for profile, message in invalid_profiles:
+                with self.subTest(message=message), self.assertRaisesRegex(ConfigError, message):
+                    config_from_mapping(
+                        {**base_config, "profile_sets": {"security": profile}},
+                        base / "config.yaml",
+                    )
+
+    def test_omitted_categories_select_all_then_exclude_subtree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "general"
+            for category, name in (("security", "xss"), ("career", "job-search")):
+                skill = bridge / "skills" / category / name
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(name, encoding="utf-8")
+            config = config_from_mapping(
+                {
+                    "bridges": [{"name": "general", "path": str(bridge), "skill_layout": "categorized"}],
+                    "ai_skill_paths": {"codex": str(base / "codex")},
+                    "profile_sets": {
+                        "security": {
+                            "destinations": ["codex"],
+                            "sources": [{"bridge": "general", "exclude_categories": ["career"]}],
+                        }
+                    },
+                },
+                base / "config.yaml",
+            )
+
+            plan = build_sync_plan(
+                config,
+                ("general",),
+                ("codex",),
+                dry_run=True,
+                exclude_category_filters={"general": config.profile_sets[0].sources[0].exclude_categories},
+            )
+
+        self.assertFalse(plan.errors)
+        self.assertEqual([action.skill.name for action in plan.actions], ["xss"])
+
     def test_category_aware_planner_selects_only_requested_subtree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -341,6 +486,42 @@ profile_sets:
         self.assertTrue(job_is_symlink)
         self.assertEqual(job_target, bridge / "skills" / "career" / "job-search")
         self.assertFalse(xss_exists)
+
+    def test_sync_profile_group_fans_out_to_all_destinations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "security"
+            skill = bridge / "skills" / "xss"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("xss", encoding="utf-8")
+            destinations = {name: base / name for name in ("claude", "codex")}
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: security
+    path: {bridge}
+ai_skill_paths:
+  claude: {destinations['claude']}
+  codex: {destinations['codex']}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+profile_sets:
+  security:
+    destinations: [claude, codex]
+    sources:
+      - bridge: security
+""",
+                encoding="utf-8",
+            )
+
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = main(["--config", str(config), "sync", "--profile", "security"])
+            links = {name: (root / "xss").is_symlink() for name, root in destinations.items()}
+
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertEqual(links, {"claude": True, "codex": True})
 
     def test_sync_all_projects_each_profile_without_broadcasting_categories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

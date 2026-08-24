@@ -116,59 +116,53 @@ Skill `name` values remain globally unique across all selected bridges. The
 syncer must reject ambiguous duplicate names even if their source directories
 are different.
 
-## Repository-first profile configuration
+## Repository-first profile groups
 
-A profile set is a destination projection, not a Hermes-only concept: it may
-target Hermes, Codex, Claude, or any configured `ai_skill_paths` destination.
-**Repositories are the primary capability boundary.** A profile generally selects
-whole flat repositories; categories are reserved for the policy repository,
-where a role may need only a policy subtree.
+A profile set is a shared policy/capability group, not a Hermes-only concept. It
+fans one selected source policy out to Claude, Codex, Hermes, or any configured
+`ai_skill_paths` destinations. **Repositories are the primary capability
+boundary.** A group generally selects whole flat repositories; categories are
+reserved for the policy repository, where a group may need only a policy subtree.
 
 ```yaml
 profile_sets:
   jobsearch:
-    destination: hermes-jobsearch
+    destinations:
+      - hermes-jobsearch
     sources:
       - bridge: general-skills                  # flat: whole shared baseline
       - bridge: job-search-skills               # flat: job-search only
       - bridge: ai-policies
         include_categories: [universal]
 
-  coder:
-    destination: hermes-coder
-    sources:
-      - bridge: general-skills
-      - bridge: coding-skills                   # flat: coding capability
-      - bridge: ai-policies
-        include_categories: [universal, coding]
-
-  claude:
-    destination: claude
+  security:
+    destinations: [claude, codex, hermes-security]
     sources:
       - bridge: general-skills
       - bridge: bounty-harness                  # flat: BBH/security capability
-      - bridge: ai-policies
-        include_categories: all
-
-  codex:
-    destination: codex
-    sources:
-      - bridge: general-skills
-      - bridge: bounty-harness
-      - bridge: ai-policies
-        include_categories: all
+      - bridge: ai-policies                     # categorized: all policy categories
 
 ai_skill_paths:
   hermes-jobsearch: ~/.hermes/profiles/jobsearch/synced-skills
-  hermes-coder: ~/.hermes/profiles/coder/synced-skills
+  hermes-security: ~/.hermes/profiles/security/synced-skills
   claude: ~/.claude/skills
   codex: ~/.codex/skills
 ```
 
-`job-search-skills` and `coding-skills` above are intended canonical
-repositories; they must be created, reviewed, and configured before activation.
-Leaving them out of Claude/Codex is what keeps their job-search capability out,
-without an exclusion list.
+Use plural `destinations` for groups, even when a group currently has one target.
+Legacy singular `destination` is accepted on input, but serialization emits the
+plural form. A destination must appear exactly once across active groups;
+unknown, repeated, competing, and unassigned destination names are errors.
+`sync all` expands every group to all of its destinations; `sync --profile
+security` expands only that group to all three destinations. When a categorized
+source omits `include_categories`, it selects all categories. Set
+`include_categories` only to whitelist subtrees; `include_categories: all`
+remains an explicit compatibility spelling. `exclude_categories` applies in
+either case. Category selectors are invalid for flat bridges.
+
+`job-search-skills` above is an intended canonical repository; it must be
+created, reviewed, and configured before activation. Leaving it out of the
+security group is what keeps that capability out, without an exclusion list.
 
 Policy categories remain capability-oriented. `universal` contains the small
 cross-agent baseline that every role needs; `coding` remains a sibling category.

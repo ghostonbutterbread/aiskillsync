@@ -916,8 +916,8 @@ def _profile_sync_request(config: Config, profile: ProfileSetConfig) -> SyncRequ
     return SyncRequest(
         config=config,
         repo_selectors=tuple(selectors),
-        destinations=(profile.destination,),
-        notices=(f"PROFILE {profile.name}: destination {profile.destination}",),
+        destinations=profile.destinations,
+        notices=(f"PROFILE {profile.name}: destinations {', '.join(profile.destinations)}",),
         category_filters=categories,
         exclude_category_filters=excluded_categories,
     )

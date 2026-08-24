@@ -334,17 +334,32 @@ aiskillsync sync 1 2
 aiskillsync sync bounty-harness --dest codex --dest claude
 ```
 
-When `profile_sets` is configured, `sync all` expands every profile set
-independently instead: each set chooses its destination and source policy, so
-skills are not broadcast across destinations. Every `ai_skill_paths` destination
-must be assigned to at least one profile set; otherwise config validation fails.
-Use `sync --profile <name>` to select one projection. Other destination/repo
-selector forms are rejected while profile sets are active, which avoids bypassing
-their policy. Prefer repository-level selection: omit a dedicated job-search
-bridge from Claude/Codex rather than filtering a general-purpose bridge. Within
-the categorized policy bridge, a broad projection can use
-`include_categories: all`, while a focused Hermes role can whitelist policy
-subtrees.
+When `profile_sets` is configured, each named entry is a shared policy or
+capability group. `sync all` expands every group to each configured destination,
+while `sync --profile security` applies that complete group to all of its
+destinations. Configure shared groups with plural `destinations` (legacy singular
+`destination` remains accepted):
+
+```yaml
+profile_sets:
+  security:
+    destinations:
+      - claude
+      - codex
+      - hermes-security
+    sources:
+      - bridge: security-policies
+```
+
+Every `ai_skill_paths` destination must be assigned exactly once across profile
+groups; unknown, duplicate, or competing destination assignments fail validation.
+Other destination/repo selector forms are rejected while profile sets are active,
+which avoids bypassing their policy. Prefer repository-level selection: omit a
+dedicated job-search bridge from Claude/Codex rather than filtering a
+general-purpose bridge. For categorized bridges, omitting `include_categories`
+selects every category; provide it only as a whitelist. `include_categories: all`
+remains accepted for compatibility, and `exclude_categories` still applies when
+inclusion is omitted. Category selectors are invalid on flat bridges.
 
 Focused skill filters:
 

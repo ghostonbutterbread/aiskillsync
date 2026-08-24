@@ -94,8 +94,14 @@ class ProfileSourceConfig:
 @dataclass(frozen=True)
 class ProfileSetConfig:
     name: str
-    destination: str
+    destinations: tuple[str, ...]
     sources: tuple[ProfileSourceConfig, ...]
+
+    @property
+    def destination(self) -> str:
+        """Legacy singular accessor for callers with a one-destination profile."""
+
+        return self.destinations[0]
 
 
 @dataclass(frozen=True)
@@ -270,9 +276,35 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
     for profile_name, profile_raw in profile_sets_raw.items():
         if not isinstance(profile_name, str) or not profile_name or not isinstance(profile_raw, dict):
             raise ConfigError("profile_sets entries must be named mappings")
-        destination = require_string(profile_raw, "destination", f"profile_sets.{profile_name}")
-        if destination not in destinations:
-            raise ConfigError(f"profile_sets.{profile_name}.destination names unknown destination: {destination}")
+        has_destination = "destination" in profile_raw
+        has_destinations = "destinations" in profile_raw
+        if has_destination and has_destinations:
+            raise ConfigError(f"profile_sets.{profile_name} cannot supply both destination and destinations")
+        if has_destination:
+            profile_destinations = (require_string(profile_raw, "destination", f"profile_sets.{profile_name}"),)
+        elif has_destinations:
+            destinations_value = profile_raw["destinations"]
+            if not isinstance(destinations_value, (list, tuple)) or not destinations_value or not all(
+                isinstance(value, str) and value for value in destinations_value
+            ):
+                raise ConfigError(f"profile_sets.{profile_name}.destinations must be a non-empty list of destination names")
+            profile_destinations = tuple(destinations_value)
+        else:
+            raise ConfigError(f"profile_sets.{profile_name} must supply destination or destinations")
+        duplicate_destinations = sorted(
+            {destination for destination in profile_destinations if profile_destinations.count(destination) > 1}
+        )
+        if duplicate_destinations:
+            raise ConfigError(
+                f"profile_sets.{profile_name}.destinations contains duplicate destination names: "
+                + ", ".join(duplicate_destinations)
+            )
+        unknown_destinations = sorted(set(profile_destinations) - set(destinations))
+        if unknown_destinations:
+            raise ConfigError(
+                f"profile_sets.{profile_name}.destinations names unknown destination: "
+                + ", ".join(unknown_destinations)
+            )
         sources_raw = profile_raw.get("sources", [])
         if not isinstance(sources_raw, list) or not sources_raw:
             raise ConfigError(f"profile_sets.{profile_name}.sources must be a non-empty list")
@@ -302,10 +334,23 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             if not isinstance(excluded_categories, list) or not all(isinstance(value, str) and value for value in excluded_categories):
                 raise ConfigError(f"profile_sets.{profile_name}.sources[{index}].exclude_categories must be a list of strings")
             sources.append(ProfileSourceConfig(bridge_name, tuple(categories), tuple(excluded_categories)))
-        profile_sets.append(ProfileSetConfig(profile_name, destination, tuple(sources)))
+        profile_sets.append(ProfileSetConfig(profile_name, profile_destinations, tuple(sources)))
 
     if profile_sets:
-        assigned_destinations = {profile.destination for profile in profile_sets}
+        destination_owners: dict[str, str] = {}
+        duplicate_assignments: list[str] = []
+        for profile in profile_sets:
+            for destination in profile.destinations:
+                if destination in destination_owners:
+                    duplicate_assignments.append(destination)
+                else:
+                    destination_owners[destination] = profile.name
+        if duplicate_assignments:
+            raise ConfigError(
+                "destination assigned by more than one profile set: "
+                + ", ".join(sorted(set(duplicate_assignments)))
+            )
+        assigned_destinations = set(destination_owners)
         unassigned_destinations = sorted(set(destinations) - assigned_destinations)
         if unassigned_destinations:
             raise ConfigError(
@@ -405,7 +450,9 @@ def config_to_text(config: Config) -> str:
         lines.extend(("", "profile_sets:"))
         for profile in config.profile_sets:
             lines.append(f"  {profile.name}:")
-            lines.append(f"    destination: {_format_scalar(profile.destination)}")
+            lines.append("    destinations:")
+            for destination in profile.destinations:
+                lines.append(f"      - {_format_scalar(destination)}")
             lines.append("    sources:")
             for source in profile.sources:
                 lines.append(f"      - bridge: {_format_scalar(source.bridge)}")
@@ -641,6 +688,36 @@ def _parse_scalar(value: str, line_number: int) -> Any:
         and value[0] in ("'", '"')
     ):
         return value[1:-1]
+    if value.startswith("[") and value.endswith("]"):
+        return _parse_inline_list(value[1:-1], line_number)
     if value.startswith("[") or value.startswith("{"):
         raise ConfigError(f"inline collections are not supported near line {line_number}")
     return value
+
+
+def _parse_inline_list(value: str, line_number: int) -> list[Any]:
+    if not value.strip():
+        return []
+    items: list[Any] = []
+    quote: str | None = None
+    start = 0
+    for index, char in enumerate(value):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == ",":
+            item = value[start:index].strip()
+            if not item:
+                raise ConfigError(f"empty inline list item near line {line_number}")
+            items.append(_parse_scalar(item, line_number))
+            start = index + 1
+    if quote is not None:
+        raise ConfigError(f"unterminated quote in inline list near line {line_number}")
+    item = value[start:].strip()
+    if not item:
+        raise ConfigError(f"empty inline list item near line {line_number}")
+    items.append(_parse_scalar(item, line_number))
+    return items
