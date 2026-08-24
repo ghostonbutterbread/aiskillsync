@@ -6,11 +6,13 @@ This repo is intended to replace per-project `sync_skills.sh` scripts with one
 config-driven sync layer that can bridge skills from multiple repos into AI
 provider skill directories.
 
-## Draft designs
+## Profile-scoped category sync
 
-- [Profile-scoped category sync](docs/PROFILE_CATEGORY_SYNC.md) — proposed
-  category-based skill projection for specialized agent profiles; not implemented
-  yet.
+`aiskillsync` supports both flat and categorized source bridges. A categorized
+bridge recursively discovers `SKILL.md` files and lets a named profile set select
+a full category subtree; a flat bridge keeps the existing direct-child behavior.
+See [Profile-scoped category sync](docs/PROFILE_CATEGORY_SYNC.md) for the
+configuration and migration contract.
 
 ## Installation
 
@@ -58,6 +60,8 @@ aiskillsync sync all
 aiskillsync sync bounty-harness --dest codex --dest claude
 aiskillsync sync 1 2
 aiskillsync sync all --dry-run
+aiskillsync sync --profile jobsearch --dry-run
+aiskillsync sync --profile jobsearch
 aiskillsync sync codex --repo bounty-harness --skill xss --adopt --dry-run
 aiskillsync sync all --overwrite
 aiskillsync root-context main --repo ai-policies
@@ -150,6 +154,7 @@ bridges:
     repo: https://github.com/ghostonbutterbread/bug-bounty-harness.git
     path: ~/projects/bug_bounty_harness
     skills_path: skills
+    skill_layout: flat
     branch: master
     enabled: true
 
