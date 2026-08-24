@@ -14,6 +14,7 @@ class Skill:
     bridge: BridgeConfig
     path: Path
     skill_md: Path
+    category: str = ""
 
 
 @dataclass(frozen=True)
@@ -81,10 +82,9 @@ def discover_bridges(config: Config) -> tuple[BridgeDiscovery, ...]:
 
         skills: list[Skill] = []
         missing_skill_md: list[Path] = []
-        for child in sorted(skills_dir.iterdir(), key=lambda item: item.name):
-            if not child.is_dir():
-                continue
-            skill_md = child / "SKILL.md"
+        candidates = (skills_dir.rglob("SKILL.md") if bridge.skill_layout == "categorized" else (child / "SKILL.md" for child in skills_dir.iterdir() if child.is_dir()))
+        for skill_md in sorted(candidates, key=lambda item: str(item)):
+            child = skill_md.parent
             if skill_md.is_file():
                 skills.append(
                     Skill(
@@ -92,6 +92,7 @@ def discover_bridges(config: Config) -> tuple[BridgeDiscovery, ...]:
                         bridge=bridge,
                         path=child.resolve(),
                         skill_md=skill_md.resolve(),
+                        category=str(child.relative_to(skills_dir).parent) if bridge.skill_layout == "categorized" else "",
                     )
                 )
             else:

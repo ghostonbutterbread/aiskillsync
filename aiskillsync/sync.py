@@ -228,6 +228,7 @@ def build_sync_plan(
     adopt: bool = False,
     include_skills: tuple[str, ...] = (),
     exclude_skills: tuple[str, ...] = (),
+    category_filters: dict[str, tuple[str, ...]] | None = None,
     preflight_notices: tuple[str, ...] = (),
     preflight_errors: tuple[str, ...] = (),
     skipped_missing_repos: tuple[str, ...] = (),
@@ -244,6 +245,7 @@ def build_sync_plan(
     skipped_missing_repo_names = set(skipped_missing_repos)
     include_skill_names = set(include_skills)
     exclude_skill_names = set(exclude_skills)
+    category_filters = category_filters or {}
     selected_skills: list[Skill] = []
 
     for discovery in selected:
@@ -278,9 +280,36 @@ def build_sync_plan(
                 f"{len(discovery.missing_skill_md)}"
             )
             continue
+        categories = category_filters.get(bridge.name, ())
+        if categories and bridge.skill_layout != "categorized":
+            errors.append(
+                f"categories can only be selected from categorized bridge {bridge.name}"
+            )
+            continue
+        available_categories = {skill.category for skill in discovery.skills}
+        for category in categories:
+            if not any(
+                available == category or available.startswith(f"{category}/")
+                for available in available_categories
+            ):
+                errors.append(
+                    f"unknown category {category!r} for categorized bridge {bridge.name}"
+                )
+        discovered_skills = (
+            (
+                skill
+                for skill in discovery.skills
+                if any(
+                    skill.category == category or skill.category.startswith(f"{category}/")
+                    for category in categories
+                )
+            )
+            if categories
+            else discovery.skills
+        )
         selected_skills.extend(
             skill
-            for skill in discovery.skills
+            for skill in discovered_skills
             if (not include_skill_names or skill.name in include_skill_names)
             and skill.name not in exclude_skill_names
         )

@@ -8,7 +8,7 @@ import hashlib
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 from urllib.parse import urlparse
@@ -65,6 +65,7 @@ class SyncRequest:
     destinations: tuple[str, ...]
     notices: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+    category_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
             "configured repo name or repo URL to sync; repeat for multiple repos. "
             "Unconfigured URLs are cloned under repo_dir when applying."
         ),
+    )
+    sync_parser.add_argument(
+        "--profile",
+        help="named profile_sets entry to sync",
     )
     sync_parser.add_argument(
         "--skill",
@@ -679,6 +684,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         adopt=adopt,
         include_skills=tuple(args.skill),
         exclude_skills=denylist,
+        category_filters=request.category_filters,
         preflight_notices=(*request.notices, *repo_preflight.notices, *materialization.notices),
         preflight_errors=(
             *request.errors,
@@ -708,6 +714,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             adopt=True,
             include_skills=tuple(args.skill),
             exclude_skills=denylist,
+            category_filters=request.category_filters,
             preflight_notices=(
                 *request.notices,
                 *repo_preflight.notices,
@@ -909,6 +916,37 @@ def _read_skill_denylist(path: Path) -> tuple[str, ...]:
 
 
 def _resolve_sync_request(config: Config, args: argparse.Namespace) -> SyncRequest:
+    profile_name = getattr(args, "profile", None)
+    if profile_name:
+        if args.terms or args.repo or args.dest:
+            return SyncRequest(
+                config=config,
+                repo_selectors=(),
+                destinations=(),
+                errors=("--profile cannot be combined with destinations or repo selectors",),
+            )
+        profile = next((item for item in config.profile_sets if item.name == profile_name), None)
+        if profile is None:
+            return SyncRequest(
+                config=config,
+                repo_selectors=(),
+                destinations=(),
+                errors=(f"unknown profile: {profile_name}",),
+            )
+        categories: dict[str, list[str]] = {}
+        selectors: list[str] = []
+        for source in profile.sources:
+            if source.bridge not in selectors:
+                selectors.append(source.bridge)
+            categories.setdefault(source.bridge, []).extend(source.include_categories)
+        return SyncRequest(
+            config=config,
+            repo_selectors=tuple(selectors),
+            destinations=(profile.destination,),
+            notices=(f"PROFILE {profile.name}: destination {profile.destination}",),
+            category_filters={name: tuple(dict.fromkeys(values)) for name, values in categories.items()},
+        )
+
     terms = tuple(args.terms)
     repo_options = tuple(args.repo)
 
@@ -1060,8 +1098,10 @@ def _with_adhoc_repositories(
             path=config.path,
             repo_dir=config.repo_dir,
             bridges=tuple(bridges),
+            lanes=config.lanes,
             ai_skill_paths=config.ai_skill_paths,
             sync=config.sync,
+            profile_sets=config.profile_sets,
         )
     return SyncRequest(
         config=resolved_config,

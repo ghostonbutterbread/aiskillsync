@@ -55,6 +55,7 @@ class BridgeConfig:
     skills_path: str
     branch: str | None = None
     enabled: bool = True
+    skill_layout: str = "flat"
 
     @property
     def skills_dir(self) -> Path:
@@ -84,6 +85,19 @@ class SyncConfig:
 
 
 @dataclass(frozen=True)
+class ProfileSourceConfig:
+    bridge: str
+    include_categories: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ProfileSetConfig:
+    name: str
+    destination: str
+    sources: tuple[ProfileSourceConfig, ...]
+
+
+@dataclass(frozen=True)
 class Config:
     path: Path
     repo_dir: Path = field(default_factory=lambda: expand_path(DEFAULT_REPO_DIR))
@@ -91,6 +105,7 @@ class Config:
     lanes: tuple[LaneGroupConfig, ...] = field(default_factory=tuple)
     ai_skill_paths: dict[str, Path] = field(default_factory=dict)
     sync: SyncConfig = field(default_factory=SyncConfig)
+    profile_sets: tuple[ProfileSetConfig, ...] = field(default_factory=tuple)
 
 
 def expand_path(value: str | Path) -> Path:
@@ -184,6 +199,9 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         enabled = item.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ConfigError(f"bridges[{index}].enabled must be true or false")
+        skill_layout = item.get("skill_layout", "flat")
+        if skill_layout not in {"flat", "categorized"}:
+            raise ConfigError(f"bridges[{index}].skill_layout must be 'flat' or 'categorized'")
         bridges.append(
             BridgeConfig(
                 name=name,
@@ -192,6 +210,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
                 skills_path=skills_path,
                 branch=branch,
                 enabled=enabled,
+                skill_layout=skill_layout,
             )
         )
 
@@ -240,6 +259,34 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         if not isinstance(value, str) or not value:
             raise ConfigError(f"ai_skill_paths.{key} must be a non-empty string")
         destinations[key] = expand_path(value)
+
+    profile_sets_raw = raw.get("profile_sets", {})
+    if profile_sets_raw is None:
+        profile_sets_raw = {}
+    if not isinstance(profile_sets_raw, dict):
+        raise ConfigError("profile_sets must be a mapping")
+    profile_sets: list[ProfileSetConfig] = []
+    for profile_name, profile_raw in profile_sets_raw.items():
+        if not isinstance(profile_name, str) or not profile_name or not isinstance(profile_raw, dict):
+            raise ConfigError("profile_sets entries must be named mappings")
+        destination = require_string(profile_raw, "destination", f"profile_sets.{profile_name}")
+        if destination not in destinations:
+            raise ConfigError(f"profile_sets.{profile_name}.destination names unknown destination: {destination}")
+        sources_raw = profile_raw.get("sources", [])
+        if not isinstance(sources_raw, list) or not sources_raw:
+            raise ConfigError(f"profile_sets.{profile_name}.sources must be a non-empty list")
+        sources: list[ProfileSourceConfig] = []
+        for index, source_raw in enumerate(sources_raw, start=1):
+            if not isinstance(source_raw, dict):
+                raise ConfigError(f"profile_sets.{profile_name}.sources[{index}] must be a mapping")
+            bridge_name = require_string(source_raw, "bridge", f"profile_sets.{profile_name}.sources[{index}]")
+            if bridge_name not in bridge_names:
+                raise ConfigError(f"profile_sets.{profile_name}.sources[{index}] names unknown bridge: {bridge_name}")
+            categories = source_raw.get("include_categories", [])
+            if not isinstance(categories, list) or not all(isinstance(value, str) and value for value in categories):
+                raise ConfigError(f"profile_sets.{profile_name}.sources[{index}].include_categories must be a list of strings")
+            sources.append(ProfileSourceConfig(bridge_name, tuple(categories)))
+        profile_sets.append(ProfileSetConfig(profile_name, destination, tuple(sources)))
 
     sync_raw = raw.get("sync", {})
     if sync_raw is None:
@@ -290,6 +337,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             default_destinations=tuple(default_destinations_raw),
             migration_denylist=tuple(migration_denylist_raw),
         ),
+        profile_sets=tuple(profile_sets),
     )
 
 
@@ -306,6 +354,8 @@ def config_to_text(config: Config) -> str:
                 lines.append(f"    repo: {_format_scalar(bridge.repo)}")
             lines.append(f"    path: {_format_scalar(bridge.path)}")
             lines.append(f"    skills_path: {_format_scalar(bridge.skills_path)}")
+            if bridge.skill_layout != "flat":
+                lines.append(f"    skill_layout: {_format_scalar(bridge.skill_layout)}")
             if bridge.branch is not None:
                 lines.append(f"    branch: {_format_scalar(bridge.branch)}")
             lines.append(f"    enabled: {str(bridge.enabled).lower()}")
@@ -325,6 +375,19 @@ def config_to_text(config: Config) -> str:
     lines.append("ai_skill_paths:")
     for key, value in sorted(config.ai_skill_paths.items()):
         lines.append(f"  {key}: {_format_scalar(value)}")
+
+    if config.profile_sets:
+        lines.extend(("", "profile_sets:"))
+        for profile in config.profile_sets:
+            lines.append(f"  {profile.name}:")
+            lines.append(f"    destination: {_format_scalar(profile.destination)}")
+            lines.append("    sources:")
+            for source in profile.sources:
+                lines.append(f"      - bridge: {_format_scalar(source.bridge)}")
+                if source.include_categories:
+                    lines.append("        include_categories:")
+                    for category in source.include_categories:
+                        lines.append(f"          - {_format_scalar(category)}")
 
     lines.append("")
     lines.append("sync:")
