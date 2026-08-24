@@ -225,6 +225,28 @@ class ProfileCategoryTests(unittest.TestCase):
 
         self.assertIn("categories can only be selected from categorized bridge flat", plan.errors)
 
+    def test_category_aware_planner_rejects_all_filter_for_flat_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "flat"
+            skill = bridge / "skills" / "xss"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("xss", encoding="utf-8")
+            config = config_from_mapping(
+                {"bridges": [{"name": "flat", "path": str(bridge)}], "ai_skill_paths": {"job": str(base / "job")}},
+                base / "config.yaml",
+            )
+
+            plan = build_sync_plan(
+                config,
+                ("flat",),
+                ("job",),
+                dry_run=True,
+                category_filters={"flat": ("all",)},
+            )
+
+        self.assertIn("categories can only be selected from categorized bridge flat", plan.errors)
+
     def test_category_aware_planner_excludes_requested_subtree_after_inclusion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

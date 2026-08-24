@@ -283,14 +283,14 @@ def build_sync_plan(
             )
             continue
         categories = category_filters.get(bridge.name, ())
-        if categories == ("all",):
-            categories = ()
         excluded_categories = exclude_category_filters.get(bridge.name, ())
         if (categories or excluded_categories) and bridge.skill_layout != "categorized":
             errors.append(
                 f"categories can only be selected from categorized bridge {bridge.name}"
             )
             continue
+        if categories == ("all",):
+            categories = ()
         available_categories = {skill.category for skill in discovery.skills}
         for category in (*categories, *excluded_categories):
             if not any(
