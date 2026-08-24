@@ -214,7 +214,8 @@ aiskillsync repo remove https://github.com/org/ai-skills.git
 Use `external add` for an upstream-maintained skill repository. It behaves like
 an ordinary bridge during sync—so a normal sync fetches the configured branch
 and updates the linked runtime skill—but records `kind: external` and keeps the
-default checkout under `repo_dir/external/<name>`. This separates upstream
+default checkout under `~/.config/aiskillsync/external/plugins/<name>` (or next
+to a custom config file). This separates upstream
 dependencies from team-owned source checkouts without changing the runtime
 symlink model.
 

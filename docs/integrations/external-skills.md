@@ -20,7 +20,7 @@ Keep externally maintained skills distinct from team-owned source checkouts whil
 
 - Focused CLI test covers add, config persistence, nested skill discovery, and symlink projection.
 - Full suite: `python3 -m unittest discover -s tests -v` — 79 passing.
-- CLI/version smoke: `python3 -m aiskillsync --version` reports `0.1.4`; `external --help` and bytecode compilation pass.
+- CLI/version smoke: `python3 -m aiskillsync --version` reports `0.1.5`; `external --help` and bytecode compilation pass.
 
 ## Deferred
 

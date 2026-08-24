@@ -502,7 +502,7 @@ sync:
                 "master",
             )
             content = config.read_text(encoding="utf-8")
-            source_root = repo_dir / "external" / "android-skill"
+            source_root = config.parent / "external" / "plugins" / "android-skill"
             source = source_root / "plugins" / "android" / "skills"
             self.write_skill(source, "android-reverse-engineering")
             subprocess.run(
@@ -521,7 +521,7 @@ sync:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Added external source android-skill", result.stdout)
         self.assertIn("kind: external", content)
-        self.assertIn(f"path: {repo_dir / 'external' / 'android-skill'}", content)
+        self.assertIn(f"path: {config.parent / 'external' / 'plugins' / 'android-skill'}", content)
         self.assertIn("skills_path: plugins/android/skills", content)
         self.assertIn("branch: master", content)
         self.assertEqual(sync_result.returncode, 0, sync_result.stdout + sync_result.stderr)

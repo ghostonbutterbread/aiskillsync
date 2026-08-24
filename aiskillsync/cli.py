@@ -292,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
         "location",
         nargs="?",
         type=Path,
-        help="local checkout path (default: repo_dir/external/<name>)",
+        help="local checkout path (default: config_dir/external/plugins/<name>)",
     )
     external_add_parser.add_argument("--name", help="configured source name (default: repo slug)")
     external_add_parser.add_argument("--path", type=Path, help=argparse.SUPPRESS)
@@ -513,7 +513,7 @@ def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     config_text = _read_config_text(config.path)
     source_kind = getattr(args, "source_kind", "managed")
     path_literal = _repo_add_path_literal(
-        config_text, args.repo, source_path, location_path, name, source_kind
+        config.path, config_text, args.repo, source_path, location_path, name, source_kind
     )
     path = source_path or expand_path(path_literal)
     new_repo = BridgeConfig(
@@ -1109,6 +1109,7 @@ def _read_config_text(path: Path) -> str:
 
 
 def _repo_add_path_literal(
+    config_path: Path,
     config_text: str,
     repo_arg: str,
     source_path: Path | None,
@@ -1124,7 +1125,7 @@ def _repo_add_path_literal(
     if repo_dir_literal is None:
         repo_dir_literal = str(DEFAULT_REPO_DIR)
     if kind == "external":
-        return str(Path(repo_dir_literal) / "external" / name)
+        return str(config_path.parent / "external" / "plugins" / name)
     return str(Path(repo_dir_literal) / name)
 
 
