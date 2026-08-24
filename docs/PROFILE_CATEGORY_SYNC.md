@@ -116,54 +116,61 @@ Skill `name` values remain globally unique across all selected bridges. The
 syncer must reject ambiguous duplicate names even if their source directories
 are different.
 
-## Proposed Configuration
+## Repository-first profile configuration
 
-Add an optional `profile_sets` section. A profile set is a destination projection,
-not a Hermes-only concept: it may target Hermes, Codex, Claude, or any configured
-`ai_skill_paths` destination. It may select categorized bridges by source-directory
-category and may include a flat bridge unchanged:
+A profile set is a destination projection, not a Hermes-only concept: it may
+target Hermes, Codex, Claude, or any configured `ai_skill_paths` destination.
+**Repositories are the primary capability boundary.** A profile generally selects
+whole flat repositories; categories are reserved for the policy repository,
+where a role may need only a policy subtree.
 
 ```yaml
 profile_sets:
   jobsearch:
     destination: hermes-jobsearch
     sources:
-      - bridge: general-skills-beta
-        include_categories:
-          - core
-          - browser-research
-          - career
-          - productivity
-          - communications
+      - bridge: general-skills                  # flat: whole shared baseline
+      - bridge: job-search-skills               # flat: job-search only
       - bridge: ai-policies
-        include_categories: [universal, research, communications]
-    include_skills: []
-    exclude_skills: []
+        include_categories: [universal]
 
   coder:
     destination: hermes-coder
     sources:
-      - bridge: general-skills-beta
-        include_categories: [core, browser-research, productivity, operations]
+      - bridge: general-skills
+      - bridge: coding-skills                   # flat: coding capability
       - bridge: ai-policies
         include_categories: [universal, coding]
 
-  hunter:
-    destination: hermes-hunter
+  claude:
+    destination: claude
     sources:
-      - bridge: bounty-harness              # flat bridge: all selected skills
+      - bridge: general-skills
+      - bridge: bounty-harness                  # flat: BBH/security capability
       - bridge: ai-policies
-        include_categories: [universal, security]
-      - bridge: general-skills-beta
-        include_categories: [core, operations]
+        include_categories: all
+
+  codex:
+    destination: codex
+    sources:
+      - bridge: general-skills
+      - bridge: bounty-harness
+      - bridge: ai-policies
+        include_categories: all
 
 ai_skill_paths:
   hermes-jobsearch: ~/.hermes/profiles/jobsearch/synced-skills
   hermes-coder: ~/.hermes/profiles/coder/synced-skills
-  hermes-hunter: ~/.hermes/profiles/hunter/synced-skills
+  claude: ~/.claude/skills
+  codex: ~/.codex/skills
 ```
 
-Policy categories are capability-oriented. `universal` contains the small
+`job-search-skills` and `coding-skills` above are intended canonical
+repositories; they must be created, reviewed, and configured before activation.
+Leaving them out of Claude/Codex is what keeps their job-search capability out,
+without an exclusion list.
+
+Policy categories remain capability-oriented. `universal` contains the small
 cross-agent baseline that every role needs; `coding` remains a sibling category.
 Security policy is one parent category with nested, independently selectable
 branches, rather than a collection of unrelated top-level security labels:
@@ -208,29 +215,40 @@ form `bridge:relative/path` and are evaluated after category selection:
 - `exclude_skills` removes a selected skill; and
 - both are reported in the receipt.
 
-## Approved Initial Migration Map
+## Canonical repository boundaries
 
-This map is a reviewed placement proposal; it is not a file move. Keep BBH as
-the canonical owner for the two listed security-support capabilities.
+Keep BBH as the canonical owner for the two listed security-support
+capabilities. Capability repositories are intentionally flat unless their own
+contract later requires nesting.
 
-### `general-skills`
+### `general-skills` (flat)
 
 ```text
-core/
-  safe-fetch, faq, papercuts, coordination, skill-seeds
-operations/
-  tmux, hoster-ssh, script-manager, resilio-sync, daddy
-accounts/
-  account-manager, bitwarden, account-tui-colors, gmail-otp
-learning/
-  nightly-learning, i-have-adhd
+skills/
+  safe-fetch/
+  faq/
+  papercuts/
+  coordination/
+  skill-seeds/
+  tmux/
+  hoster-ssh/
+  script_manager/
+  resilio-sync/
+  daddy/
+  account-manager/
+  bitwarden/
+  account-tui-colors/
+  gmail-otp/
+  nightly-learning/
+  i-have-adhd/
 ```
 
-Move `bounty-storage` and `huge-ingest` into BBH rather than leaving them in
-`general-skills`. Their helpers, tests, documentation, and source references
-move with the canonical skill so only one runnable copy remains.
+`bounty-storage` and `huge-ingest` remain BBH-owned. Create separate flat
+`coding-skills` and `job-search-skills` repositories when those capabilities
+need independent distribution. A profile includes the repository it needs;
+there is no `career` category in `general-skills` to blacklist.
 
-### `ai-policies`
+### `ai-policies` (categorized)
 
 ```text
 universal/

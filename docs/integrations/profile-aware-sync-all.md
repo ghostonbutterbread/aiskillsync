@@ -3,9 +3,9 @@
 ## Intent
 
 Make configured profile sets the authoritative projections for `aiskillsync sync all`.
-Hermes task roles can whitelist category subtrees while broad CLI roles such as
-Claude and Codex use `include_categories: all` and exclude only prohibited
-subtrees such as `career`.
+Profiles primarily select repositories as capability boundaries. Hermes task
+roles can include narrow capability repositories; Claude and Codex omit the
+dedicated job-search repository. Categories remain a policy-repository control.
 
 ## Base and target
 
@@ -20,7 +20,9 @@ subtrees such as `career`.
   never broadcasts all bridges to every destination.
 - `sync --profile <name>` uses the same projection behavior.
 - `include_categories: all` explicitly selects all categories on a categorized
-  bridge; `exclude_categories` removes category subtrees afterward.
+  bridge; `exclude_categories` remains available for policy-subtree exceptions.
+- Flat capability repositories are selected as whole bridges; a dedicated
+  repository is the preferred way to withhold a capability such as job search.
 - Category filters, including `all`, are invalid on flat bridges.
 - Every configured destination must be assigned to a profile set while profile
   sets are active; ordinary destination/repository selector forms are rejected

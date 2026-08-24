@@ -340,9 +340,11 @@ skills are not broadcast across destinations. Every `ai_skill_paths` destination
 must be assigned to at least one profile set; otherwise config validation fails.
 Use `sync --profile <name>` to select one projection. Other destination/repo
 selector forms are rejected while profile sets are active, which avoids bypassing
-their policy. A broad Codex or Claude projection can use `include_categories: all`
-and then exclude only categories it must not receive (for example, `career`),
-while a focused Hermes role normally declares `include_categories` as a whitelist.
+their policy. Prefer repository-level selection: omit a dedicated job-search
+bridge from Claude/Codex rather than filtering a general-purpose bridge. Within
+the categorized policy bridge, a broad projection can use
+`include_categories: all`, while a focused Hermes role can whitelist policy
+subtrees.
 
 Focused skill filters:
 
