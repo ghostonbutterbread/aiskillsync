@@ -280,6 +280,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     repo_add_parser.set_defaults(func=cmd_repo_add)
 
+    external_parser = subparsers.add_parser(
+        "external", help="manage externally maintained skill sources"
+    )
+    external_subparsers = external_parser.add_subparsers(dest="external_command", required=True)
+    external_add_parser = external_subparsers.add_parser(
+        "add", help="add an external skill source to config"
+    )
+    external_add_parser.add_argument("repo", metavar="repo-url", help="external Git repository URL")
+    external_add_parser.add_argument(
+        "location",
+        nargs="?",
+        type=Path,
+        help="local checkout path (default: repo_dir/external/<name>)",
+    )
+    external_add_parser.add_argument("--name", help="configured source name (default: repo slug)")
+    external_add_parser.add_argument("--path", type=Path, help=argparse.SUPPRESS)
+    external_add_parser.add_argument(
+        "--skills-path", default="skills", help="skills directory inside the external repository"
+    )
+    external_add_parser.add_argument("--branch", help="branch to clone when missing")
+    external_add_parser.add_argument("--disabled", action="store_true", help="add the source disabled")
+    external_add_parser.add_argument("--dry-run", action="store_true", help="preview the config change without writing")
+    external_add_parser.set_defaults(func=cmd_repo_add, source_kind="external")
+
     repo_remove_parser = repo_subparsers.add_parser("remove", help="remove a repo from config")
     repo_remove_parser.add_argument("repo", help="repo name, index, or URL to remove")
     repo_remove_parser.add_argument(
@@ -487,7 +511,10 @@ def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
 
     location_path = path_alias if path_alias is not None else location
     config_text = _read_config_text(config.path)
-    path_literal = _repo_add_path_literal(config_text, args.repo, source_path, location_path, name)
+    source_kind = getattr(args, "source_kind", "managed")
+    path_literal = _repo_add_path_literal(
+        config_text, args.repo, source_path, location_path, name, source_kind
+    )
     path = source_path or expand_path(path_literal)
     new_repo = BridgeConfig(
         name=name,
@@ -496,6 +523,7 @@ def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         skills_path=args.skills_path,
         branch=args.branch,
         enabled=not args.disabled,
+        kind=source_kind,
     )
 
     errors = _repo_add_conflicts(config, new_repo)
@@ -505,16 +533,17 @@ def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         return 1
 
     state = "enabled" if new_repo.enabled else "disabled"
+    label = "external source" if new_repo.kind == "external" else "repo"
     if args.dry_run:
         print(
-            f"Would add repo {new_repo.name} ({state}): "
+            f"Would add {label} {new_repo.name} ({state}): "
             f"{_repo_source_label(new_repo)} -> {new_repo.path}",
             file=stdout,
         )
         return 0
 
     _write_config_bridge_add(config.path, config_text, new_repo, path_literal)
-    print(f"Added repo {new_repo.name} ({state}): {_repo_source_label(new_repo)}", file=stdout)
+    print(f"Added {label} {new_repo.name} ({state}): {_repo_source_label(new_repo)}", file=stdout)
     print(f"Local path: {new_repo.path}", file=stdout)
     print("No repo directory was cloned or modified", file=stdout)
     return 0
@@ -1085,6 +1114,7 @@ def _repo_add_path_literal(
     source_path: Path | None,
     location_path: Path | None,
     name: str,
+    kind: str = "managed",
 ) -> str:
     if source_path is not None:
         return repo_arg
@@ -1093,6 +1123,8 @@ def _repo_add_path_literal(
     repo_dir_literal = _top_level_string_value(config_text, "repo_dir")
     if repo_dir_literal is None:
         repo_dir_literal = str(DEFAULT_REPO_DIR)
+    if kind == "external":
+        return str(Path(repo_dir_literal) / "external" / name)
     return str(Path(repo_dir_literal) / name)
 
 
@@ -1266,6 +1298,8 @@ def _bridge_entry_text(
     )
     if bridge.branch is not None:
         lines.append(f"{child_indent}branch: {_format_scalar(bridge.branch)}")
+    if bridge.kind != "managed":
+        lines.append(f"{child_indent}kind: {_format_scalar(bridge.kind)}")
     lines.append(f"{child_indent}enabled: {str(bridge.enabled).lower()}")
     return newline.join(lines) + newline
 

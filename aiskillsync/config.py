@@ -55,6 +55,7 @@ class BridgeConfig:
     skills_path: str
     branch: str | None = None
     enabled: bool = True
+    kind: str = "managed"
 
     @property
     def skills_dir(self) -> Path:
@@ -184,6 +185,9 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         enabled = item.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ConfigError(f"bridges[{index}].enabled must be true or false")
+        kind = item.get("kind", "managed")
+        if kind not in {"managed", "external"}:
+            raise ConfigError(f"bridges[{index}].kind must be managed or external")
         bridges.append(
             BridgeConfig(
                 name=name,
@@ -192,6 +196,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
                 skills_path=skills_path,
                 branch=branch,
                 enabled=enabled,
+                kind=kind,
             )
         )
 
@@ -308,6 +313,8 @@ def config_to_text(config: Config) -> str:
             lines.append(f"    skills_path: {_format_scalar(bridge.skills_path)}")
             if bridge.branch is not None:
                 lines.append(f"    branch: {_format_scalar(bridge.branch)}")
+            if bridge.kind != "managed":
+                lines.append(f"    kind: {_format_scalar(bridge.kind)}")
             lines.append(f"    enabled: {str(bridge.enabled).lower()}")
     else:
         lines.append("bridges: []")

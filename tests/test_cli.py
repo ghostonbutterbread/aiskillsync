@@ -464,6 +464,70 @@ sync:
         self.assertIn(f"CLONE repo toolkit: git clone --branch main", sync_result.stdout)
         self.assertEqual(target, (repo_dir / "toolkit" / "skills" / "from-added").resolve())
 
+    def test_external_add_uses_external_checkout_and_persists_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo_dir = base / "repos"
+            codex = base / "codex"
+            codex.mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""repo_dir: {repo_dir}
+
+bridges: []
+
+ai_skill_paths:
+  codex: {codex}
+
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations:
+    - codex
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "external",
+                "add",
+                "https://github.com/example/android-skill.git",
+                "--name",
+                "android-skill",
+                "--skills-path",
+                "plugins/android/skills",
+                "--branch",
+                "master",
+            )
+            content = config.read_text(encoding="utf-8")
+            source_root = repo_dir / "external" / "android-skill"
+            source = source_root / "plugins" / "android" / "skills"
+            self.write_skill(source, "android-reverse-engineering")
+            subprocess.run(
+                ["git", "init", "--initial-branch=master", str(source_root)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            sync_result = self.run_cli(
+                "--config", str(config), "sync", "codex", "--repo", "android-skill"
+            )
+            link = codex / "android-reverse-engineering"
+            target = link.resolve() if link.is_symlink() else None
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Added external source android-skill", result.stdout)
+        self.assertIn("kind: external", content)
+        self.assertIn(f"path: {repo_dir / 'external' / 'android-skill'}", content)
+        self.assertIn("skills_path: plugins/android/skills", content)
+        self.assertIn("branch: master", content)
+        self.assertEqual(sync_result.returncode, 0, sync_result.stdout + sync_result.stderr)
+        self.assertIn("LINK codex:android-reverse-engineering", sync_result.stdout)
+        self.assertEqual(target, (source / "android-reverse-engineering").resolve())
+
     def test_repo_add_without_repo_dir_defaults_to_config_aiskillsync_repos_not_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

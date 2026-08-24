@@ -198,6 +198,7 @@ aiskillsync add https://github.com/org/ai-skills.git
 aiskillsync add https://github.com/org/ai-skills.git ~/projects/ai-skills
 aiskillsync repo add https://github.com/org/ai-skills.git --name ai-skills --branch main
 aiskillsync add ~/projects/local-skill-repo
+aiskillsync external add https://github.com/example/third-party-skills.git --skills-path plugins/example/skills
 ```
 
 Remove a repo from config without deleting its local checkout or any provider
@@ -206,6 +207,24 @@ skill symlinks:
 ```bash
 aiskillsync remove ai-skills
 aiskillsync repo remove https://github.com/org/ai-skills.git
+```
+
+## External Skill Sources
+
+Use `external add` for an upstream-maintained skill repository. It behaves like
+an ordinary bridge during sync—so a normal sync fetches the configured branch
+and updates the linked runtime skill—but records `kind: external` and keeps the
+default checkout under `repo_dir/external/<name>`. This separates upstream
+dependencies from team-owned source checkouts without changing the runtime
+symlink model.
+
+```bash
+aiskillsync external add https://github.com/SimoneAvogadro/android-reverse-engineering-skill.git \
+  --name android-reverse-engineering \
+  --skills-path plugins/android-reverse-engineering/skills \
+  --branch master
+
+aiskillsync sync all --repo android-reverse-engineering --dry-run -v
 ```
 
 ## Policy Lanes: stable and beta
