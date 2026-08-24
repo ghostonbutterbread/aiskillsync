@@ -6,6 +6,12 @@ This repo is intended to replace per-project `sync_skills.sh` scripts with one
 config-driven sync layer that can bridge skills from multiple repos into AI
 provider skill directories.
 
+## Draft designs
+
+- [Profile-scoped category sync](docs/PROFILE_CATEGORY_SYNC.md) — proposed
+  category-based skill projection for specialized agent profiles; not implemented
+  yet.
+
 ## Installation
 
 Install as an isolated CLI with pipx:
