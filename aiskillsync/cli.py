@@ -8,7 +8,7 @@ import hashlib
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 from urllib.parse import urlparse
@@ -20,6 +20,7 @@ from .config import (
     ConfigError,
     DEFAULT_CONFIG_TEXT,
     DEFAULT_REPO_DIR,
+    ProfileSetConfig,
     _format_scalar,
     _split_key_value,
     _strip_inline_comment,
@@ -43,12 +44,15 @@ from .lanes import effective_config, load_active_lanes, resolve_switch, save_act
 from .sync import (
     SyncAction,
     SyncPlan,
+    add_profile_manifest_prunes,
     apply_prune_actions,
     apply_sync_plan,
     build_sync_plan,
     make_backup_root,
     materialize_repositories_for_sync,
+    remove_pruned_profile_manifest_records,
     select_bridge_configs,
+    update_profile_projection_manifest,
 )
 
 
@@ -65,6 +69,9 @@ class SyncRequest:
     destinations: tuple[str, ...]
     notices: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+    category_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    exclude_category_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    profile_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +153,10 @@ def build_parser() -> argparse.ArgumentParser:
             "configured repo name or repo URL to sync; repeat for multiple repos. "
             "Unconfigured URLs are cloned under repo_dir when applying."
         ),
+    )
+    sync_parser.add_argument(
+        "--profile",
+        help="named profile_sets entry to sync",
     )
     sync_parser.add_argument(
         "--skill",
@@ -680,7 +691,8 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         )
         return 2
 
-    request = _resolve_sync_request(config, args)
+    requests = _resolve_sync_requests(config, args)
+    request = _combine_sync_requests(requests)
     dry_run = args.dry_run
     adopt = args.adopt or args.overwrite_local_copies
     denylist, denylist_errors = _sync_denylist(config, args)
@@ -700,23 +712,11 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         skip_clone_bridges=frozenset(repo_preflight.skip_clone_bridges),
         skip_pull_bridges=frozenset(repo_preflight.skip_pull_bridges),
     )
-    plan = build_sync_plan(
-        request.config,
-        request.repo_selectors,
-        request.destinations,
-        dry_run=dry_run,
-        adopt=adopt,
-        include_skills=tuple(args.skill),
-        exclude_skills=denylist,
-        preflight_notices=(*request.notices, *repo_preflight.notices, *materialization.notices),
-        preflight_errors=(
-            *request.errors,
-            *denylist_errors,
-            *repo_preflight.errors,
-            *materialization.errors,
-        ),
+    plan = _build_sync_requests_plan(
+        requests, args, dry_run=dry_run, adopt=adopt, denylist=denylist, backup_root=backup_root,
+        preflight_notices=(*repo_preflight.notices, *materialization.notices),
+        preflight_errors=(*denylist_errors, *repo_preflight.errors, *materialization.errors),
         skipped_missing_repos=materialization.skipped_missing_roots,
-        backup_root=backup_root,
     )
     if (
         not dry_run
@@ -729,28 +729,12 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     ):
         adopt = True
         backup_root = make_backup_root()
-        plan = build_sync_plan(
-            request.config,
-            request.repo_selectors,
-            request.destinations,
-            dry_run=dry_run,
-            adopt=True,
-            include_skills=tuple(args.skill),
-            exclude_skills=denylist,
-            preflight_notices=(
-                *request.notices,
-                *repo_preflight.notices,
-                *materialization.notices,
-                "WARN destination conflicts accepted for overwrite; existing entries will be backed up first",
-            ),
-            preflight_errors=(
-                *request.errors,
-                *denylist_errors,
-                *repo_preflight.errors,
-                *materialization.errors,
-            ),
+        plan = _build_sync_requests_plan(
+            requests, args, dry_run=dry_run, adopt=True, denylist=denylist, backup_root=backup_root,
+            preflight_notices=(*repo_preflight.notices, *materialization.notices,
+                               "WARN destination conflicts accepted for overwrite; existing entries will be backed up first"),
+            preflight_errors=(*denylist_errors, *repo_preflight.errors, *materialization.errors),
             skipped_missing_repos=materialization.skipped_missing_roots,
-            backup_root=backup_root,
         )
     _print_sync_plan(plan, stdout, verbosity=args.verbose)
 
@@ -758,6 +742,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         if plan.prunes and not dry_run:
             try:
                 pruned = apply_prune_actions(plan)
+                remove_pruned_profile_manifest_records(plan, config.path)
             except (OSError, ValueError) as exc:
                 print(f"aiskillsync: prune failed: {exc}", file=stderr)
                 _print_sync_summary(plan, "blocked", stdout)
@@ -776,6 +761,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
     try:
         result = apply_sync_plan(plan)
+        update_profile_projection_manifest(plan, config.path)
     except (OSError, ValueError) as exc:
         print(f"aiskillsync: apply failed: {exc}", file=stderr)
         _print_sync_summary(plan, "blocked", stdout)
@@ -937,7 +923,131 @@ def _read_skill_denylist(path: Path) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _resolve_sync_requests(config: Config, args: argparse.Namespace) -> tuple[SyncRequest, ...]:
+    if getattr(args, "profile", None):
+        return (_resolve_sync_request(config, args),)
+    if config.profile_sets:
+        if tuple(args.terms) == ("all",) and not args.repo and not args.dest:
+            return tuple(
+                _profile_sync_request(config, profile)
+                for profile in config.profile_sets
+                if profile.destinations
+            )
+        return (
+            SyncRequest(
+                config=config,
+                repo_selectors=(),
+                destinations=(),
+                errors=("profile_sets are active; use 'sync all' or '--profile <name>'",),
+            ),
+        )
+    return (_resolve_sync_request(config, args),)
+
+
+def _profile_sync_request(config: Config, profile: ProfileSetConfig) -> SyncRequest:
+    if not profile.destinations:
+        return SyncRequest(
+            config=config,
+            repo_selectors=(),
+            destinations=(),
+            errors=(f"PROFILE {profile.name}: no destinations configured",),
+        )
+    selectors: list[str] = []
+    categories: dict[str, tuple[str, ...]] = {}
+    excluded_categories: dict[str, tuple[str, ...]] = {}
+    for source in profile.sources:
+        selectors.append(source.bridge)
+        categories[source.bridge] = source.include_categories
+        excluded_categories[source.bridge] = source.exclude_categories
+    return SyncRequest(
+        config=config,
+        repo_selectors=tuple(selectors),
+        destinations=profile.destinations,
+        notices=(f"PROFILE {profile.name}: destinations {', '.join(profile.destinations)}",),
+        category_filters=categories,
+        exclude_category_filters=excluded_categories,
+        profile_name=profile.name,
+    )
+
+
+def _combine_sync_requests(requests: tuple[SyncRequest, ...]) -> SyncRequest:
+    first = requests[0]
+    return SyncRequest(
+        config=first.config,
+        repo_selectors=tuple(dict.fromkeys(selector for request in requests for selector in request.repo_selectors)),
+        destinations=tuple(dict.fromkeys(destination for request in requests for destination in request.destinations)),
+        notices=tuple(notice for request in requests for notice in request.notices),
+        errors=tuple(error for request in requests for error in request.errors),
+    )
+
+
+def _build_sync_requests_plan(
+    requests: tuple[SyncRequest, ...],
+    args: argparse.Namespace,
+    *,
+    dry_run: bool,
+    adopt: bool,
+    denylist: tuple[str, ...],
+    backup_root: Path | None,
+    preflight_notices: tuple[str, ...],
+    preflight_errors: tuple[str, ...],
+    skipped_missing_repos: tuple[str, ...],
+) -> SyncPlan:
+    plans = tuple(
+        build_sync_plan(
+            request.config,
+            request.repo_selectors,
+            request.destinations,
+            dry_run=dry_run,
+            adopt=adopt,
+            include_skills=tuple(args.skill),
+            exclude_skills=denylist,
+            category_filters=request.category_filters,
+            exclude_category_filters=request.exclude_category_filters,
+            preflight_notices=(*request.notices, *(preflight_notices if index == 0 else ())),
+            preflight_errors=(*request.errors, *(preflight_errors if index == 0 else ())),
+            skipped_missing_repos=skipped_missing_repos,
+            backup_root=backup_root,
+            profile_name=request.profile_name,
+        )
+        for index, request in enumerate(requests)
+    )
+    plans = tuple(add_profile_manifest_prunes(plan, request.config.path) for plan, request in zip(plans, requests))
+    return SyncPlan(
+        dry_run=dry_run,
+        adopt=adopt,
+        destinations=tuple(dict.fromkeys(destination for plan in plans for destination in plan.destinations)),
+        selected_discoveries=tuple(
+            dict.fromkeys(discovery for plan in plans for discovery in plan.selected_discoveries)
+        ),
+        actions=tuple(action for plan in plans for action in plan.actions),
+        notices=tuple(notice for plan in plans for notice in plan.notices),
+        errors=tuple(error for plan in plans for error in plan.errors),
+        backup_root=backup_root,
+        duplicate_skills={name: skills for plan in plans for name, skills in plan.duplicate_skills.items()},
+    )
+
+
 def _resolve_sync_request(config: Config, args: argparse.Namespace) -> SyncRequest:
+    profile_name = getattr(args, "profile", None)
+    if profile_name:
+        if args.terms or args.repo or args.dest:
+            return SyncRequest(
+                config=config,
+                repo_selectors=(),
+                destinations=(),
+                errors=("--profile cannot be combined with destinations or repo selectors",),
+            )
+        profile = next((item for item in config.profile_sets if item.name == profile_name), None)
+        if profile is None:
+            return SyncRequest(
+                config=config,
+                repo_selectors=(),
+                destinations=(),
+                errors=(f"unknown profile: {profile_name}",),
+            )
+        return _profile_sync_request(config, profile)
+
     terms = tuple(args.terms)
     repo_options = tuple(args.repo)
 
@@ -1089,8 +1199,10 @@ def _with_adhoc_repositories(
             path=config.path,
             repo_dir=config.repo_dir,
             bridges=tuple(bridges),
+            lanes=config.lanes,
             ai_skill_paths=config.ai_skill_paths,
             sync=config.sync,
+            profile_sets=config.profile_sets,
         )
     return SyncRequest(
         config=resolved_config,
