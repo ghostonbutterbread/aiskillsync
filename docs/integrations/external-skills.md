@@ -2,8 +2,8 @@
 
 - **Status:** ready for review
 - **Branch:** `feat/external-skills`
-- **Base:** `ebca8b6b1fe91b4dd65bb0e75fddb9c4a70e095d` (local `main`)
-- **Target:** repository integration branch to be selected during reconciliation; local `main` is currently diverged from `origin/main`.
+- **Base:** `8dea009` (`origin/main`, including merged profile projections)
+- **Target:** repository integration branch to be selected during reconciliation.
 
 ## Intent
 
@@ -11,16 +11,17 @@ Keep externally maintained skills distinct from team-owned source checkouts whil
 
 ## Implemented contract
 
-- `aiskillsync external add <repo-url>` records a bridge with `kind: external`.
-- The default checkout path is `repo_dir/external/<name>`.
+- `aiskillsync external add <repo-url> --profile <name>` records a bridge with `kind: external` and assigns it to an existing profile set.
+- `--profile all` deliberately expands to every configured profile set; it cannot be mixed with named profiles.
+- The default checkout path is `~/.config/aiskillsync/external/plugins/<name>` (or `external/plugins/<name>` beside a custom config file).
 - `--skills-path` supports nested skill layouts such as the Android reverse-engineering plugin.
 - External bridges use the existing clone/pull/symlink sync flow without changing existing managed bridges.
 
 ## Evidence
 
-- Focused CLI test covers add, config persistence, nested skill discovery, and symlink projection.
-- Full suite: `python3 -m unittest discover -s tests -v` — 79 passing.
-- CLI/version smoke: `python3 -m aiskillsync --version` reports `0.1.6`; `external --help` and bytecode compilation pass.
+- Focused CLI tests cover external registration, profile-all assignment, config persistence, nested skill discovery, and symlink projection.
+- Full suite: `python3 -m unittest discover -s tests -v` — 104 passing.
+- CLI/version smoke: `python3 -m aiskillsync --version` reports `0.1.14`; `external add --help` and bytecode compilation pass.
 
 ## Deferred
 

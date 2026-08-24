@@ -468,16 +468,27 @@ sync:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             repo_dir = base / "repos"
+            baseline = base / "baseline"
+            self.write_skill(baseline / "skills", "core")
             codex = base / "codex"
             codex.mkdir()
             config = base / "config.yaml"
             config.write_text(
                 f"""repo_dir: {repo_dir}
 
-bridges: []
+bridges:
+  - name: baseline
+    path: {baseline}
+    skills_path: skills
 
 ai_skill_paths:
   codex: {codex}
+
+profile_sets:
+  android:
+    destination: codex
+    sources:
+      - bridge: baseline
 
 sync:
   pull_before_sync: false
@@ -496,6 +507,8 @@ sync:
                 "https://github.com/example/android-skill.git",
                 "--name",
                 "android-skill",
+                "--profile",
+                "android",
                 "--skills-path",
                 "plugins/android/skills",
                 "--branch",
@@ -514,7 +527,7 @@ sync:
                 text=True,
             )
             sync_result = self.run_cli(
-                "--config", str(config), "sync", "codex", "--repo", "android-skill"
+                "--config", str(config), "sync", "--profile", "android"
             )
             link = codex / "android-reverse-engineering"
             second_link = codex / "android-api-notes"
@@ -532,6 +545,63 @@ sync:
         self.assertIn("LINK codex:android-api-notes", sync_result.stdout)
         self.assertEqual(target, (source / "android-reverse-engineering").resolve())
         self.assertEqual(second_target, (source / "android-api-notes").resolve())
+
+    def test_external_add_assigns_source_to_all_configured_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            baseline = base / "baseline"
+            self.write_skill(baseline / "skills", "core")
+            hunter = base / "hunter"
+            coder = base / "coder"
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: baseline
+    path: {baseline}
+    skills_path: skills
+
+ai_skill_paths:
+  hunter: {hunter}
+  coder: {coder}
+
+profile_sets:
+  hunter:
+    destination: hunter
+    sources:
+      - bridge: baseline
+  coder:
+    destination: coder
+    sources:
+      - bridge: baseline
+
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations:
+    - hunter
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "--config",
+                str(config),
+                "external",
+                "add",
+                "https://github.com/example/android-skill.git",
+                "--name",
+                "android-skill",
+                "--profile",
+                "all",
+            )
+            content = config.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Added external source android-skill", result.stdout)
+        self.assertIn("Profiles: hunter, coder", result.stdout)
+        self.assertIn(f"path: {base / 'external' / 'plugins' / 'android-skill'}", content)
+        self.assertIn("kind: external", content)
+        self.assertEqual(content.count("- bridge: android-skill"), 2)
 
     def test_repo_add_without_repo_dir_defaults_to_config_aiskillsync_repos_not_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

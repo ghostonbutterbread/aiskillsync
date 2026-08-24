@@ -311,6 +311,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--skills-path", default="skills", help="skills directory inside the external repository"
     )
     external_add_parser.add_argument("--branch", help="branch to clone when missing")
+    external_add_parser.add_argument(
+        "--profile",
+        action="append",
+        required=True,
+        help="profile_sets entry to receive this source; repeat or use 'all'",
+    )
     external_add_parser.add_argument("--disabled", action="store_true", help="add the source disabled")
     external_add_parser.add_argument("--dry-run", action="store_true", help="preview the config change without writing")
     external_add_parser.set_defaults(func=cmd_repo_add, source_kind="external")
@@ -498,6 +504,14 @@ def cmd_doctor(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
 def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     config = _load_config(args)
+    source_kind = getattr(args, "source_kind", "managed")
+    profile_names, profile_errors = _external_add_profiles(
+        config, source_kind, getattr(args, "profile", ())
+    )
+    if profile_errors:
+        for error in profile_errors:
+            print(f"aiskillsync: {error}", file=stderr)
+        return 2
     location = getattr(args, "location", None)
     path_alias = args.path
     if location is not None and path_alias is not None:
@@ -522,7 +536,6 @@ def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
 
     location_path = path_alias if path_alias is not None else location
     config_text = _read_config_text(config.path)
-    source_kind = getattr(args, "source_kind", "managed")
     path_literal = _repo_add_path_literal(
         config.path, config_text, args.repo, source_path, location_path, name, source_kind
     )
@@ -553,9 +566,11 @@ def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         )
         return 0
 
-    _write_config_bridge_add(config.path, config_text, new_repo, path_literal)
+    _write_config_bridge_add(config.path, config_text, new_repo, path_literal, profile_names)
     print(f"Added {label} {new_repo.name} ({state}): {_repo_source_label(new_repo)}", file=stdout)
     print(f"Local path: {new_repo.path}", file=stdout)
+    if profile_names:
+        print(f"Profiles: {', '.join(profile_names)}", file=stdout)
     print("No repo directory was cloned or modified", file=stdout)
     return 0
 
@@ -1250,10 +1265,16 @@ def _top_level_string_value(text: str, key: str) -> str | None:
 
 
 def _write_config_bridge_add(
-    path: Path, original_text: str, bridge: BridgeConfig, path_literal: str
+    path: Path,
+    original_text: str,
+    bridge: BridgeConfig,
+    path_literal: str,
+    profile_names: tuple[str, ...] = (),
 ) -> None:
     try:
         updated = _add_bridge_entry_text(original_text, bridge, path_literal)
+        for profile_name in profile_names:
+            updated = _add_profile_source_entry_text(updated, profile_name, bridge.name)
         atomic_write_text(path, updated)
     except OSError as exc:
         raise ConfigError(f"could not write config {path}: {exc}") from exc
@@ -1292,6 +1313,80 @@ def _add_bridge_entry_text(text: str, bridge: BridgeConfig, path_literal: str) -
         insert_at = block.start + 1
     lines[insert_at:insert_at] = entry
     return "".join(lines)
+
+
+def _external_add_profiles(
+    config: Config, source_kind: str, requested: tuple[str, ...] | list[str]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Resolve explicit external-source routing without changing regular repo add."""
+
+    if source_kind != "external":
+        return (), ()
+    selected = tuple(dict.fromkeys(requested))
+    if not selected:
+        return (), ("external add requires at least one --profile",)
+    if "all" in selected:
+        if selected != ("all",):
+            return (), ("--profile all cannot be combined with named profiles",)
+        if not config.profile_sets:
+            return (), ("--profile all requires configured profile_sets",)
+        return tuple(profile.name for profile in config.profile_sets), ()
+    available = {profile.name for profile in config.profile_sets}
+    unknown = tuple(name for name in selected if name not in available)
+    if unknown:
+        return (), ("unknown profile: " + ", ".join(unknown),)
+    return selected, ()
+
+
+def _add_profile_source_entry_text(text: str, profile_name: str, bridge_name: str) -> str:
+    """Append one bridge source to a named profile without rewriting its config."""
+
+    lines = text.splitlines(keepends=True)
+    profile_sets = _find_top_level_block(lines, "profile_sets")
+    if profile_sets is None:
+        raise ConfigError("external add requires a profile_sets block")
+    profile_block = _find_mapping_child_block(lines, profile_sets, profile_name)
+    if profile_block is None:
+        raise ConfigError(f"could not locate profile_sets.{profile_name} in config text")
+    sources_block = _find_mapping_child_block(lines, profile_block, "sources")
+    if sources_block is None:
+        raise ConfigError(f"could not locate profile_sets.{profile_name}.sources in config text")
+    item_indent = _bridge_item_indent(lines, sources_block) or " " * (_block_indent(lines, sources_block) + 2)
+    insert_at = _bridge_content_end(lines, sources_block)
+    lines.insert(insert_at, f"{item_indent}- bridge: {_format_scalar(bridge_name)}{_preferred_newline(text)}")
+    return "".join(lines)
+
+
+def _find_mapping_child_block(
+    lines: list[str], parent: ConfigTextBlock, key: str
+) -> ConfigTextBlock | None:
+    candidates: list[tuple[int, int]] = []
+    for index in range(parent.start + 1, parent.end):
+        logical = _logical_line(lines[index])
+        if logical is None:
+            continue
+        indent, content = logical
+        key_value = _split_key_value(content)
+        if indent > 0 and key_value == (key, ""):
+            candidates.append((index, indent))
+    if not candidates:
+        return None
+    child_indent = min(indent for _, indent in candidates)
+    start = next(index for index, indent in candidates if indent == child_indent)
+    end = parent.end
+    for index in range(start + 1, parent.end):
+        logical = _logical_line(lines[index])
+        if logical is not None and logical[0] <= child_indent:
+            end = index
+            break
+    return ConfigTextBlock(start=start, end=end)
+
+
+def _block_indent(lines: list[str], block: ConfigTextBlock) -> int:
+    logical = _logical_line(lines[block.start])
+    if logical is None:
+        raise ConfigError("could not determine config block indentation")
+    return logical[0]
 
 
 def _ensure_repo_dir_text(text: str) -> str:

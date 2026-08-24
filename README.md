@@ -211,7 +211,7 @@ aiskillsync add https://github.com/org/ai-skills.git
 aiskillsync add https://github.com/org/ai-skills.git ~/projects/ai-skills
 aiskillsync repo add https://github.com/org/ai-skills.git --name ai-skills --branch main
 aiskillsync add ~/projects/local-skill-repo
-aiskillsync external add https://github.com/example/third-party-skills.git --skills-path plugins/example/skills
+aiskillsync external add https://github.com/example/third-party-skills.git --profile hunter --skills-path plugins/example/skills
 ```
 
 Remove a repo from config without deleting its local checkout or any provider
@@ -225,20 +225,25 @@ aiskillsync repo remove https://github.com/org/ai-skills.git
 ## External Skill Sources
 
 Use `external add` for an upstream-maintained skill repository. It behaves like
-an ordinary bridge during sync—so a normal sync fetches the configured branch
-and updates the linked runtime skill—but records `kind: external` and keeps the
-default checkout under `~/.config/aiskillsync/external/plugins/<name>` (or next
-to a custom config file). This separates upstream
-dependencies from team-owned source checkouts without changing the runtime
-symlink model.
+an ordinary bridge during sync—so a normal profile sync fetches the configured
+branch and updates the linked runtime skill—but records `kind: external`, keeps
+the default checkout under `~/.config/aiskillsync/external/plugins/<name>` (or
+next to a custom config file), and requires an explicit `--profile` routing
+decision. This separates upstream dependencies from team-owned source checkouts
+without changing the runtime symlink model.
 
 ```bash
 aiskillsync external add https://github.com/SimoneAvogadro/android-reverse-engineering-skill.git \
   --name android-reverse-engineering \
+  --profile hunter \
   --skills-path plugins/android-reverse-engineering/skills \
   --branch master
 
-aiskillsync sync all --repo android-reverse-engineering --dry-run -v
+# Deliberately route a source to every configured profile set.
+aiskillsync external add https://github.com/example/shared-skills.git --profile all
+
+# Then preview or apply only the intended profile projection.
+aiskillsync sync --profile hunter --dry-run -v
 ```
 
 `skills_path` names the directory whose immediate child directories are skills.
