@@ -13,6 +13,7 @@ Keep externally maintained skills distinct from team-owned source checkouts whil
 
 - `aiskillsync external add <repo-url> --profile <name>` records a bridge with `kind: external` and assigns it to an existing profile set.
 - `--profile all` deliberately expands to every configured profile set; it cannot be mixed with named profiles.
+- `--skill <name>` is repeatable and records a profile-source `include_skills` filter; the next sync validates that each named skill exists below the source's declared `skills_path`.
 - The default checkout path is `~/.config/aiskillsync/external/plugins/<name>` (or `external/plugins/<name>` beside a custom config file).
 - `--skills-path` supports nested skill layouts such as the Android reverse-engineering plugin.
 - External bridges use the existing clone/pull/symlink sync flow without changing existing managed bridges.
@@ -20,8 +21,9 @@ Keep externally maintained skills distinct from team-owned source checkouts whil
 ## Evidence
 
 - Focused CLI tests cover external registration, profile-all assignment, config persistence, nested skill discovery, and symlink projection.
-- Full suite: `python3 -m unittest discover -s tests -v` — 104 passing.
-- CLI/version smoke: `python3 -m aiskillsync --version` reports `0.1.14`; `external add --help` and bytecode compilation pass.
+- Full suite: `python3 -m unittest discover -s tests -v` — 105 passing.
+- CLI/version smoke: `python3 -m aiskillsync --version` reports `0.1.15`; `external add --help` and bytecode compilation pass.
+- End-to-end fixture: a real `file://` Git source with `alpha` and `beta` skills cloned into the external plugins cache; `--skill alpha` projected only `alpha` into the `hunter` profile.
 
 ## Deferred
 

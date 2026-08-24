@@ -232,6 +232,7 @@ def build_sync_plan(
     dry_run: bool,
     adopt: bool = False,
     include_skills: tuple[str, ...] = (),
+    include_skill_filters: dict[str, tuple[str, ...]] | None = None,
     exclude_skills: tuple[str, ...] = (),
     category_filters: dict[str, tuple[str, ...]] | None = None,
     exclude_category_filters: dict[str, tuple[str, ...]] | None = None,
@@ -251,6 +252,7 @@ def build_sync_plan(
     notices: list[str] = [*preflight_notices]
     skipped_missing_repo_names = set(skipped_missing_repos)
     include_skill_names = set(include_skills)
+    include_skill_filters = include_skill_filters or {}
     exclude_skill_names = set(exclude_skills)
     category_filters = category_filters or {}
     exclude_category_filters = exclude_category_filters or {}
@@ -318,6 +320,14 @@ def build_sync_plan(
             if categories
             else discovery.skills
         )
+        source_selected_skills = include_skill_filters.get(bridge.name, ())
+        available_names = {skill.name for skill in discovery.skills}
+        missing_source_skills = sorted(set(source_selected_skills) - available_names)
+        if missing_source_skills:
+            errors.append(
+                f"repo {bridge.name}: selected skills not found: " + ", ".join(missing_source_skills)
+            )
+            continue
         selected_skills.extend(
             skill
             for skill in discovered_skills
@@ -325,6 +335,7 @@ def build_sync_plan(
                 skill.category == category or skill.category.startswith(f"{category}/")
                 for category in excluded_categories
             )
+            and (not source_selected_skills or skill.name in source_selected_skills)
             and (not include_skill_names or skill.name in include_skill_names)
             and skill.name not in exclude_skill_names
         )

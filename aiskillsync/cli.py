@@ -71,6 +71,7 @@ class SyncRequest:
     errors: tuple[str, ...] = ()
     category_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
     exclude_category_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    include_skill_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
     profile_name: str | None = None
 
 
@@ -310,6 +311,12 @@ def build_parser() -> argparse.ArgumentParser:
     external_add_parser.add_argument(
         "--skills-path", default="skills", help="skills directory inside the external repository"
     )
+    external_add_parser.add_argument(
+        "--skill",
+        action="append",
+        default=[],
+        help="only assign this discovered skill to the selected profiles; repeat for multiple skills",
+    )
     external_add_parser.add_argument("--branch", help="branch to clone when missing")
     external_add_parser.add_argument(
         "--profile",
@@ -505,6 +512,7 @@ def cmd_doctor(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     config = _load_config(args)
     source_kind = getattr(args, "source_kind", "managed")
+    selected_skill_names = tuple(dict.fromkeys(getattr(args, "skill", ())))
     profile_names, profile_errors = _external_add_profiles(
         config, source_kind, getattr(args, "profile", ())
     )
@@ -566,7 +574,9 @@ def cmd_repo_add(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         )
         return 0
 
-    _write_config_bridge_add(config.path, config_text, new_repo, path_literal, profile_names)
+    _write_config_bridge_add(
+        config.path, config_text, new_repo, path_literal, profile_names, selected_skill_names
+    )
     print(f"Added {label} {new_repo.name} ({state}): {_repo_source_label(new_repo)}", file=stdout)
     print(f"Local path: {new_repo.path}", file=stdout)
     if profile_names:
@@ -970,10 +980,12 @@ def _profile_sync_request(config: Config, profile: ProfileSetConfig) -> SyncRequ
     selectors: list[str] = []
     categories: dict[str, tuple[str, ...]] = {}
     excluded_categories: dict[str, tuple[str, ...]] = {}
+    included_skills: dict[str, tuple[str, ...]] = {}
     for source in profile.sources:
         selectors.append(source.bridge)
         categories[source.bridge] = source.include_categories
         excluded_categories[source.bridge] = source.exclude_categories
+        included_skills[source.bridge] = source.include_skills
     return SyncRequest(
         config=config,
         repo_selectors=tuple(selectors),
@@ -981,6 +993,7 @@ def _profile_sync_request(config: Config, profile: ProfileSetConfig) -> SyncRequ
         notices=(f"PROFILE {profile.name}: destinations {', '.join(profile.destinations)}",),
         category_filters=categories,
         exclude_category_filters=excluded_categories,
+        include_skill_filters=included_skills,
         profile_name=profile.name,
     )
 
@@ -1016,6 +1029,7 @@ def _build_sync_requests_plan(
             dry_run=dry_run,
             adopt=adopt,
             include_skills=tuple(args.skill),
+            include_skill_filters=request.include_skill_filters,
             exclude_skills=denylist,
             category_filters=request.category_filters,
             exclude_category_filters=request.exclude_category_filters,
@@ -1270,11 +1284,14 @@ def _write_config_bridge_add(
     bridge: BridgeConfig,
     path_literal: str,
     profile_names: tuple[str, ...] = (),
+    selected_skill_names: tuple[str, ...] = (),
 ) -> None:
     try:
         updated = _add_bridge_entry_text(original_text, bridge, path_literal)
         for profile_name in profile_names:
-            updated = _add_profile_source_entry_text(updated, profile_name, bridge.name)
+            updated = _add_profile_source_entry_text(
+                updated, profile_name, bridge.name, selected_skill_names
+            )
         atomic_write_text(path, updated)
     except OSError as exc:
         raise ConfigError(f"could not write config {path}: {exc}") from exc
@@ -1338,7 +1355,12 @@ def _external_add_profiles(
     return selected, ()
 
 
-def _add_profile_source_entry_text(text: str, profile_name: str, bridge_name: str) -> str:
+def _add_profile_source_entry_text(
+    text: str,
+    profile_name: str,
+    bridge_name: str,
+    selected_skill_names: tuple[str, ...] = (),
+) -> str:
     """Append one bridge source to a named profile without rewriting its config."""
 
     lines = text.splitlines(keepends=True)
@@ -1352,8 +1374,17 @@ def _add_profile_source_entry_text(text: str, profile_name: str, bridge_name: st
     if sources_block is None:
         raise ConfigError(f"could not locate profile_sets.{profile_name}.sources in config text")
     item_indent = _bridge_item_indent(lines, sources_block) or " " * (_block_indent(lines, sources_block) + 2)
+    newline = _preferred_newline(text)
     insert_at = _bridge_content_end(lines, sources_block)
-    lines.insert(insert_at, f"{item_indent}- bridge: {_format_scalar(bridge_name)}{_preferred_newline(text)}")
+    entry_lines = [f"{item_indent}- bridge: {_format_scalar(bridge_name)}{newline}"]
+    if selected_skill_names:
+        child_indent = item_indent + "  "
+        entry_lines.append(f"{child_indent}include_skills:{newline}")
+        entry_lines.extend(
+            f"{child_indent}  - {_format_scalar(skill_name)}{newline}"
+            for skill_name in selected_skill_names
+        )
+    lines[insert_at:insert_at] = entry_lines
     return "".join(lines)
 
 

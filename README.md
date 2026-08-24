@@ -237,6 +237,7 @@ aiskillsync external add https://github.com/SimoneAvogadro/android-reverse-engin
   --name android-reverse-engineering \
   --profile hunter \
   --skills-path plugins/android-reverse-engineering/skills \
+  --skill android-reverse-engineering \
   --branch master
 
 # Deliberately route a source to every configured profile set.
@@ -252,6 +253,15 @@ agent runtime, together with its references and scripts. A normal skills
 repository therefore needs no option (`skills_path: skills` is the default);
 plugin and marketplace repositories use `--skills-path` to select the nested
 skill root deliberately.
+
+`--skill` is optional and repeatable. When omitted, every skill discovered
+directly under `skills_path` is assigned to the selected profile. When supplied,
+only those named child directories are assigned—for example, `--skill
+android-reverse-engineering` selects
+`<skills_path>/android-reverse-engineering/SKILL.md` and does not project its
+sibling skills. The name is checked at the next sync after the external source
+has been cloned; an unknown name blocks the profile sync rather than silently
+installing a different skill.
 
 The explicit root is part of external-source review: reviewers must confirm it
 matches the intended plugin/marketplace entry and enumerate the discovered

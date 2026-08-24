@@ -603,6 +603,59 @@ sync:
         self.assertIn("kind: external", content)
         self.assertEqual(content.count("- bridge: android-skill"), 2)
 
+    def test_external_add_selected_skill_projects_only_that_skill_to_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            baseline = base / "baseline"
+            self.write_skill(baseline / "skills", "core")
+            destination = base / "hunter"
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: baseline
+    path: {baseline}
+    skills_path: skills
+
+ai_skill_paths:
+  hunter: {destination}
+
+profile_sets:
+  hunter:
+    destination: hunter
+    sources:
+      - bridge: baseline
+
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations:
+    - hunter
+""",
+                encoding="utf-8",
+            )
+            add_result = self.run_cli(
+                "--config", str(config), "external", "add",
+                "https://github.com/example/android-skill.git",
+                "--name", "android-skill",
+                "--profile", "hunter",
+                "--skill", "android-reverse-engineering",
+            )
+            content = config.read_text(encoding="utf-8")
+            source = base / "external" / "plugins" / "android-skill" / "skills"
+            self.write_skill(source, "android-reverse-engineering")
+            self.write_skill(source, "android-api-notes")
+            sync_result = self.run_cli("--config", str(config), "sync", "--profile", "hunter")
+            selected = destination / "android-reverse-engineering"
+            unselected = destination / "android-api-notes"
+            selected_is_symlink = selected.is_symlink()
+            unselected_exists = unselected.exists()
+
+        self.assertEqual(add_result.returncode, 0, add_result.stdout + add_result.stderr)
+        self.assertIn("include_skills:", content)
+        self.assertEqual(sync_result.returncode, 0, sync_result.stdout + sync_result.stderr)
+        self.assertTrue(selected_is_symlink)
+        self.assertFalse(unselected_exists)
+
     def test_repo_add_without_repo_dir_defaults_to_config_aiskillsync_repos_not_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
