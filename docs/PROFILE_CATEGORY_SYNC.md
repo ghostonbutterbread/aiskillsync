@@ -48,9 +48,42 @@ This is correct for a single universal catalog, but it does not express:
 7. **Stable/beta lane selection happens before category selection.** A profile
    never combines two variants of one lane group.
 
+## Flat and Categorized Bridge Support
+
+Category support is opt-in per bridge. Existing repositories remain valid without
+moving a file or changing a command.
+
+```yaml
+bridges:
+  - name: bounty-harness
+    path: ~/projects/bug_bounty_harness
+    skills_path: skills
+    skill_layout: flat             # default when omitted
+
+  - name: general-skills-beta
+    path: ~/projects/general-skills-beta
+    skills_path: skills
+    skill_layout: categorized
+
+  - name: ai-policies
+    path: ~/projects/ai-policies
+    skills_path: skills
+    skill_layout: categorized
+```
+
+`flat` preserves current behavior: discover only direct `skills/<skill>/SKILL.md`
+children and allow bridge-wide sync or explicit skill filters. It does not
+interpret nested directories as categories.
+
+`categorized` recursively discovers `SKILL.md` directories and records the
+source-relative path as category metadata. Category selectors are valid only for
+categorized bridges. A malformed categorized tree, an unrecognized category, or
+a nested skill in a bridge declared `flat` is an error rather than a silent
+partial sync.
+
 ## Canonical Repository Layout
 
-Skill repositories may organize skills in nested directories:
+A categorized skill repository may organize skills in nested directories:
 
 ```text
 general-skills/
@@ -83,7 +116,8 @@ are different.
 
 ## Proposed Configuration
 
-Add two optional top-level configuration sections:
+Add an optional `profile_sets` section. It may select categorized bridges by
+source-directory category and may include a flat bridge unchanged:
 
 ```yaml
 profile_sets:
@@ -97,6 +131,8 @@ profile_sets:
           - career
           - productivity
           - communications
+      - bridge: ai-policies
+        include_categories: [universal, research, communications]
     include_skills: []
     exclude_skills: []
 
@@ -106,15 +142,14 @@ profile_sets:
       - bridge: general-skills-beta
         include_categories: [core, browser-research, productivity, operations]
       - bridge: ai-policies
-        include_categories: [coding]
+        include_categories: [universal, coding]
 
   hunter:
     destination: hermes-hunter
     sources:
-      - bridge: bounty-harness
-        include_categories: [security]
+      - bridge: bounty-harness              # flat bridge: all selected skills
       - bridge: ai-policies
-        include_categories: [security]
+        include_categories: [universal, security]
       - bridge: general-skills-beta
         include_categories: [core, operations]
 
@@ -123,6 +158,13 @@ ai_skill_paths:
   hermes-coder: ~/.hermes/profiles/coder/synced-skills
   hermes-hunter: ~/.hermes/profiles/hunter/synced-skills
 ```
+
+Policy categories are capability-oriented, not a claim that all policies are
+security or coding policies. `universal` contains the small cross-agent baseline
+that every role needs; specialized policy categories such as `coding`,
+`security`, `research`, or `communications` are selected only where applicable.
+A policy remains canonical in `ai-policies` and is projected to multiple agents
+as symlinks rather than copied into role repositories.
 
 `include_categories` values are relative to the named bridge's `skills_path`.
 A value selects its full subtree. An omitted `include_categories` preserves
@@ -160,9 +202,11 @@ for `--dest`.
 
 1. Resolve active stable/beta lanes.
 2. Materialize and validate each selected bridge once.
-3. Recursively discover `SKILL.md` directories, recording each skill's relative
-   path, leaf name, and bridge identity.
-4. Resolve the selected category subtrees and explicit exceptions.
+3. Discover each bridge according to its declared layout: direct child skills
+   for `flat`; recursive `SKILL.md` directories with source-relative paths for
+   `categorized`.
+4. Resolve category subtrees only for categorized bridges, then apply explicit
+   exceptions and ordinary flat-bridge selection.
 5. Reject missing categories, malformed skill directories, duplicate selected
    skill names, duplicate destination names, and ambiguous source-qualified
    identifiers before destination mutation.
@@ -208,10 +252,12 @@ matches.
 
 ### Phase A — Design and inventory
 
-- Add recursive, source-relative discovery in aiskillsync behind tests.
-- Inventory existing canonical repositories and classify proposed directories.
+- Add layout-aware discovery in aiskillsync behind tests: `flat` remains direct
+  child discovery, while `categorized` is recursive and source-relative.
+- Inventory existing canonical repositories and mark each bridge's initial
+  layout explicitly before moving any files.
 - Record owner boundaries: BBH for security workflows, ai-policies for policies,
-  general-skills for cross-domain reusable capabilities.
+  and general-skills for cross-domain reusable capabilities.
 - Do not move skills or alter live profile configuration in this phase.
 
 ### Phase B — Profile-set engine
@@ -243,10 +289,15 @@ matches.
 
 ### Phase E — Repository category migration
 
-- Move general-skills into reviewed category directories in a dedicated change.
-- Update contributor guidance so a new skill must select its canonical category.
-- Update BBH and ai-policies only where their current flat layout needs a
-  category boundary; do not reorganize solely for aesthetics.
+- Move general-skills and ai-policies into reviewed category directories in
+  separate dedicated changes.
+- Give ai-policies a deliberately small `universal` category for cross-agent
+  policy, with specialist policy categories only where the behavior is truly
+  role-specific.
+- Update contributor guidance so a new skill or policy must select its canonical
+  category.
+- Keep BBH flat initially unless a security-workflow category boundary becomes
+  a demonstrated routing need; do not reorganize solely for aesthetics.
 - Add `coder` and `hunter` profile sets after their category selections are
   reviewed.
 
