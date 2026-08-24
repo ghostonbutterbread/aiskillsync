@@ -55,6 +55,7 @@ class BridgeConfig:
     skills_path: str
     branch: str | None = None
     enabled: bool = True
+    skill_layout: str = "flat"
 
     @property
     def skills_dir(self) -> Path:
@@ -84,6 +85,26 @@ class SyncConfig:
 
 
 @dataclass(frozen=True)
+class ProfileSourceConfig:
+    bridge: str
+    include_categories: tuple[str, ...] = ()
+    exclude_categories: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ProfileSetConfig:
+    name: str
+    destinations: tuple[str, ...]
+    sources: tuple[ProfileSourceConfig, ...]
+
+    @property
+    def destination(self) -> str:
+        """Legacy singular accessor for callers with a one-destination profile."""
+
+        return self.destinations[0]
+
+
+@dataclass(frozen=True)
 class Config:
     path: Path
     repo_dir: Path = field(default_factory=lambda: expand_path(DEFAULT_REPO_DIR))
@@ -91,12 +112,22 @@ class Config:
     lanes: tuple[LaneGroupConfig, ...] = field(default_factory=tuple)
     ai_skill_paths: dict[str, Path] = field(default_factory=dict)
     sync: SyncConfig = field(default_factory=SyncConfig)
+    profile_sets: tuple[ProfileSetConfig, ...] = field(default_factory=tuple)
 
 
 def expand_path(value: str | Path) -> Path:
     """Expand ``~`` and environment variables without requiring the path to exist."""
 
     return Path(os.path.expandvars(str(value))).expanduser()
+
+
+def canonical_path(path: Path) -> Path:
+    """Resolve existing aliases while retaining a usable path for absent roots."""
+
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path.absolute()
 
 
 def default_config_path() -> Path:
@@ -184,6 +215,9 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         enabled = item.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ConfigError(f"bridges[{index}].enabled must be true or false")
+        skill_layout = item.get("skill_layout", "flat")
+        if skill_layout not in {"flat", "categorized"}:
+            raise ConfigError(f"bridges[{index}].skill_layout must be 'flat' or 'categorized'")
         bridges.append(
             BridgeConfig(
                 name=name,
@@ -192,6 +226,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
                 skills_path=skills_path,
                 branch=branch,
                 enabled=enabled,
+                skill_layout=skill_layout,
             )
         )
 
@@ -240,6 +275,109 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         if not isinstance(value, str) or not value:
             raise ConfigError(f"ai_skill_paths.{key} must be a non-empty string")
         destinations[key] = expand_path(value)
+
+    profile_sets_raw = raw.get("profile_sets", {})
+    if profile_sets_raw is None:
+        profile_sets_raw = {}
+    if not isinstance(profile_sets_raw, dict):
+        raise ConfigError("profile_sets must be a mapping")
+    profile_sets: list[ProfileSetConfig] = []
+    for profile_name, profile_raw in profile_sets_raw.items():
+        if not isinstance(profile_name, str) or not profile_name or not isinstance(profile_raw, dict):
+            raise ConfigError("profile_sets entries must be named mappings")
+        has_destination = "destination" in profile_raw
+        has_destinations = "destinations" in profile_raw
+        if has_destination and has_destinations:
+            raise ConfigError(f"profile_sets.{profile_name} cannot supply both destination and destinations")
+        if has_destination:
+            profile_destinations = (require_string(profile_raw, "destination", f"profile_sets.{profile_name}"),)
+        elif has_destinations:
+            destinations_value = profile_raw["destinations"]
+            if not isinstance(destinations_value, (list, tuple)) or not all(
+                isinstance(value, str) and value for value in destinations_value
+            ):
+                raise ConfigError(f"profile_sets.{profile_name}.destinations must be a list of destination names")
+            profile_destinations = tuple(destinations_value)
+        else:
+            raise ConfigError(f"profile_sets.{profile_name} must supply destination or destinations")
+        duplicate_destinations = sorted(
+            {destination for destination in profile_destinations if profile_destinations.count(destination) > 1}
+        )
+        if duplicate_destinations:
+            raise ConfigError(
+                f"profile_sets.{profile_name}.destinations contains duplicate destination names: "
+                + ", ".join(duplicate_destinations)
+            )
+        unknown_destinations = sorted(set(profile_destinations) - set(destinations))
+        if unknown_destinations:
+            raise ConfigError(
+                f"profile_sets.{profile_name}.destinations names unknown destination: "
+                + ", ".join(unknown_destinations)
+            )
+        sources_raw = profile_raw.get("sources", [])
+        if not isinstance(sources_raw, list) or not sources_raw:
+            raise ConfigError(f"profile_sets.{profile_name}.sources must be a non-empty list")
+        sources: list[ProfileSourceConfig] = []
+        source_bridges: set[str] = set()
+        for index, source_raw in enumerate(sources_raw, start=1):
+            if not isinstance(source_raw, dict):
+                raise ConfigError(f"profile_sets.{profile_name}.sources[{index}] must be a mapping")
+            bridge_name = require_string(source_raw, "bridge", f"profile_sets.{profile_name}.sources[{index}]")
+            if bridge_name not in bridge_names:
+                raise ConfigError(f"profile_sets.{profile_name}.sources[{index}] names unknown bridge: {bridge_name}")
+            if bridge_name in source_bridges:
+                raise ConfigError(f"profile_sets.{profile_name} names bridge more than once: {bridge_name}")
+            source_bridges.add(bridge_name)
+            categories = source_raw.get("include_categories", [])
+            if categories == "all":
+                categories = ("all",)
+            if not isinstance(categories, (list, tuple)) or not all(isinstance(value, str) and value for value in categories):
+                raise ConfigError(
+                    f"profile_sets.{profile_name}.sources[{index}].include_categories must be 'all' or a list of strings"
+                )
+            if "all" in categories and tuple(categories) != ("all",):
+                raise ConfigError(
+                    f"profile_sets.{profile_name}.sources[{index}].include_categories cannot mix 'all' with named categories"
+                )
+            excluded_categories = source_raw.get("exclude_categories", [])
+            if not isinstance(excluded_categories, list) or not all(isinstance(value, str) and value for value in excluded_categories):
+                raise ConfigError(f"profile_sets.{profile_name}.sources[{index}].exclude_categories must be a list of strings")
+            sources.append(ProfileSourceConfig(bridge_name, tuple(categories), tuple(excluded_categories)))
+        profile_sets.append(ProfileSetConfig(profile_name, profile_destinations, tuple(sources)))
+
+    if profile_sets:
+        destination_owners: dict[str, str] = {}
+        duplicate_assignments: list[str] = []
+        for profile in profile_sets:
+            for destination in profile.destinations:
+                if destination in destination_owners:
+                    duplicate_assignments.append(destination)
+                else:
+                    destination_owners[destination] = profile.name
+        if duplicate_assignments:
+            raise ConfigError(
+                "destination assigned by more than one profile set: "
+                + ", ".join(sorted(set(duplicate_assignments)))
+            )
+        canonical_owners: dict[Path, str] = {}
+        shared_roots: list[str] = []
+        for destination, owner in destination_owners.items():
+            root = canonical_path(destinations[destination])
+            if root in canonical_owners:
+                shared_roots.append(f"{canonical_owners[root]}, {destination} ({root})")
+            else:
+                canonical_owners[root] = destination
+        if shared_roots:
+            raise ConfigError(
+                "profile set destinations share canonical root path: " + "; ".join(shared_roots)
+            )
+        assigned_destinations = set(destination_owners)
+        unassigned_destinations = sorted(set(destinations) - assigned_destinations)
+        if unassigned_destinations:
+            raise ConfigError(
+                "profile_sets are active; every ai_skill_paths destination must be assigned: "
+                + ", ".join(unassigned_destinations)
+            )
 
     sync_raw = raw.get("sync", {})
     if sync_raw is None:
@@ -290,6 +428,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             default_destinations=tuple(default_destinations_raw),
             migration_denylist=tuple(migration_denylist_raw),
         ),
+        profile_sets=tuple(profile_sets),
     )
 
 
@@ -306,6 +445,8 @@ def config_to_text(config: Config) -> str:
                 lines.append(f"    repo: {_format_scalar(bridge.repo)}")
             lines.append(f"    path: {_format_scalar(bridge.path)}")
             lines.append(f"    skills_path: {_format_scalar(bridge.skills_path)}")
+            if bridge.skill_layout != "flat":
+                lines.append(f"    skill_layout: {_format_scalar(bridge.skill_layout)}")
             if bridge.branch is not None:
                 lines.append(f"    branch: {_format_scalar(bridge.branch)}")
             lines.append(f"    enabled: {str(bridge.enabled).lower()}")
@@ -325,6 +466,27 @@ def config_to_text(config: Config) -> str:
     lines.append("ai_skill_paths:")
     for key, value in sorted(config.ai_skill_paths.items()):
         lines.append(f"  {key}: {_format_scalar(value)}")
+
+    if config.profile_sets:
+        lines.extend(("", "profile_sets:"))
+        for profile in config.profile_sets:
+            lines.append(f"  {profile.name}:")
+            lines.append("    destinations:")
+            for destination in profile.destinations:
+                lines.append(f"      - {_format_scalar(destination)}")
+            lines.append("    sources:")
+            for source in profile.sources:
+                lines.append(f"      - bridge: {_format_scalar(source.bridge)}")
+                if source.include_categories == ("all",):
+                    lines.append("        include_categories: all")
+                elif source.include_categories:
+                    lines.append("        include_categories:")
+                    for category in source.include_categories:
+                        lines.append(f"          - {_format_scalar(category)}")
+                if source.exclude_categories:
+                    lines.append("        exclude_categories:")
+                    for category in source.exclude_categories:
+                        lines.append(f"          - {_format_scalar(category)}")
 
     lines.append("")
     lines.append("sync:")
@@ -547,6 +709,36 @@ def _parse_scalar(value: str, line_number: int) -> Any:
         and value[0] in ("'", '"')
     ):
         return value[1:-1]
+    if value.startswith("[") and value.endswith("]"):
+        return _parse_inline_list(value[1:-1], line_number)
     if value.startswith("[") or value.startswith("{"):
         raise ConfigError(f"inline collections are not supported near line {line_number}")
     return value
+
+
+def _parse_inline_list(value: str, line_number: int) -> list[Any]:
+    if not value.strip():
+        return []
+    items: list[Any] = []
+    quote: str | None = None
+    start = 0
+    for index, char in enumerate(value):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == ",":
+            item = value[start:index].strip()
+            if not item:
+                raise ConfigError(f"empty inline list item near line {line_number}")
+            items.append(_parse_scalar(item, line_number))
+            start = index + 1
+    if quote is not None:
+        raise ConfigError(f"unterminated quote in inline list near line {line_number}")
+    item = value[start:].strip()
+    if not item:
+        raise ConfigError(f"empty inline list item near line {line_number}")
+    items.append(_parse_scalar(item, line_number))
+    return items

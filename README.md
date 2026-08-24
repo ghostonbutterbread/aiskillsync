@@ -6,6 +6,16 @@ This repo is intended to replace per-project `sync_skills.sh` scripts with one
 config-driven sync layer that can bridge skills from multiple repos into AI
 provider skill directories.
 
+## Profile-scoped category sync
+
+`aiskillsync` supports both flat and categorized source bridges. A categorized
+bridge recursively discovers `SKILL.md` files and lets a named profile set select
+a full category subtree. Profile sets are destination projections for any target
+(including Codex and Claude), not just Hermes profiles. A flat bridge keeps the
+existing direct-child behavior.
+See [Profile-scoped category sync](docs/PROFILE_CATEGORY_SYNC.md) for the
+configuration and migration contract.
+
 ## Installation
 
 Install as an isolated CLI with pipx:
@@ -52,6 +62,8 @@ aiskillsync sync all
 aiskillsync sync bounty-harness --dest codex --dest claude
 aiskillsync sync 1 2
 aiskillsync sync all --dry-run
+aiskillsync sync --profile jobsearch --dry-run
+aiskillsync sync --profile jobsearch
 aiskillsync sync codex --repo bounty-harness --skill xss --adopt --dry-run
 aiskillsync sync all --overwrite
 aiskillsync root-context main --repo ai-policies
@@ -144,6 +156,7 @@ bridges:
     repo: https://github.com/ghostonbutterbread/bug-bounty-harness.git
     path: ~/projects/bug_bounty_harness
     skills_path: skills
+    skill_layout: flat
     branch: master
     enabled: true
 
@@ -310,9 +323,9 @@ The command replaces only the `AIPOLICIES_MANAGED` block when the target file
 already has one. If the target exists without that block, the managed block is
 appended so local provider-specific context is preserved.
 
-The old repo-first selector syntax remains supported. `sync all` still means all
-repos into `sync.default_destinations`, and repeated `--dest` flags still
-select legacy destinations:
+The old repo-first selector syntax remains supported. Without `profile_sets`,
+`sync all` means all repos into `sync.default_destinations`, and repeated
+`--dest` flags still select legacy destinations:
 
 ```bash
 aiskillsync sync all
@@ -320,6 +333,40 @@ aiskillsync sync bounty-harness
 aiskillsync sync 1 2
 aiskillsync sync bounty-harness --dest codex --dest claude
 ```
+
+When `profile_sets` is configured, each named entry is a shared policy or
+capability group. `sync all` expands every group to each configured destination,
+while `sync --profile security` applies that complete group to all of its
+destinations. Configure shared groups with plural `destinations` (legacy singular
+`destination` remains accepted):
+
+```yaml
+profile_sets:
+  security:
+    destinations:
+      - claude
+      - codex
+      - hermes-security
+    sources:
+      - bridge: security-policies
+```
+
+Every `ai_skill_paths` destination must be assigned exactly once across profile
+groups; unknown, duplicate, or competing destination assignments fail validation.
+A group may intentionally declare `destinations: []` as a dormant template for a
+future agent; `sync all` skips it, and a focused `sync --profile <name>` reports
+that it has no destinations rather than falling back to default destinations.
+After a successful non-dry-run profile sync, `profile-projections.json` beside
+the config records that profile's canonical managed links. Removing a source
+later prunes only a still-matching recorded link; dry runs never write this
+manifest and first use never guesses legacy ownership. Other destination/repo
+selector forms are rejected while profile sets are active,
+which avoids bypassing their policy. Prefer repository-level selection: omit a
+dedicated job-search bridge from Claude/Codex rather than filtering a
+general-purpose bridge. For categorized bridges, omitting `include_categories`
+selects every category; provide it only as a whitelist. `include_categories: all`
+remains accepted for compatibility, and `exclude_categories` still applies when
+inclusion is omitted. Category selectors are invalid on flat bridges.
 
 Focused skill filters:
 
