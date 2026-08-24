@@ -19,8 +19,10 @@ do not touch live configuration or destinations.
 ## Implemented contract
 
 - `destinations` is the preferred plural profile schema; a legacy singular
-  `destination` normalizes to a one-element destination tuple.
-- Profiles reject both forms together, neither form, empty/non-string lists,
+  `destination` normalizes to a one-element destination tuple. An explicit
+  empty plural list defines a dormant future-agent template and is skipped by
+  `sync all`.
+- Profiles reject both forms together, neither form, invalid list values,
   unknown or duplicate names, competing group assignments, and unassigned
   configured destinations while groups are active.
 - `sync all` and `sync --profile <name>` fan the group source selection out to
@@ -33,12 +35,19 @@ do not touch live configuration or destinations.
 
 ## Evidence
 
-- RED observed before production changes: four focused new tests failed for
-  absent plural schema/fan-out behavior and missing `destinations` attribute.
-- `python3 -m unittest discover -s tests -v` — 97 tests passed.
-- `python3 -m py_compile aiskillsync/*.py tests/*.py` — passed.
-- `python3 -m aiskillsync --version` — `aiskillsync 0.1.11`.
-- `git diff --check` — clean.
+- Profile group fan-out and category coverage passed before lifecycle hardening.
+- Lifecycle regression coverage proves source removal is pruned only after it
+  was successfully recorded, an unrelated link survives, and another profile
+  group remains untouched.
+- Canonical shared destination roots across profile groups are rejected.
+- Final full-suite and source-version receipts are recorded before integration.
+
+## Lifecycle state
+
+Successful profile projections write non-secret managed-link receipts to
+`profile-projections.json` beside the selected configuration. A later source
+removal can prune only a still-matching recorded target. Dry runs do not write
+state, and an upgrade does not infer ownership from legacy links.
 
 ## Activation boundary
 

@@ -582,6 +582,169 @@ profile_sets:
         self.assertEqual(linked["claude"], {"job-search": False, "xss": True})
         self.assertEqual(linked["codex"], {"job-search": False, "xss": True})
 
+    def test_sync_profile_prunes_removed_source_only_after_it_was_managed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            sources = {name: base / name for name in ("source-a", "source-b")}
+            for name, root in sources.items():
+                skill = root / "skills" / name
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(name, encoding="utf-8")
+            destination = base / "profile"
+            config = base / "config.yaml"
+
+            def write_config(source_names: tuple[str, ...]) -> None:
+                source_entries = "\n".join(
+                    f"      - bridge: {name}" for name in source_names
+                )
+                bridge_entries = "\n".join(
+                    f"  - name: {name}\n    path: {root}" for name, root in sources.items()
+                )
+                config.write_text(
+                    f"""bridges:
+{bridge_entries}
+ai_skill_paths:
+  profile: {destination}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+profile_sets:
+  focused:
+    destination: profile
+    sources:
+{source_entries}
+""",
+                    encoding="utf-8",
+                )
+
+            write_config(("source-a", "source-b"))
+            initial_stdout, initial_stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(initial_stdout), contextlib.redirect_stderr(initial_stderr):
+                initial_result = main(["--config", str(config), "sync", "--profile", "focused"])
+            external_link = destination / "external"
+            external_link.parent.mkdir(parents=True, exist_ok=True)
+            external_link.symlink_to(sources["source-b"] / "skills" / "source-b", target_is_directory=True)
+            write_config(("source-a",))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = main(["--config", str(config), "sync", "--profile", "focused"])
+            retained = (destination / "source-a").is_symlink()
+            removed = not (destination / "source-b").exists() and not (destination / "source-b").is_symlink()
+            external_retained = external_link.is_symlink()
+
+        self.assertEqual(initial_result, 0, initial_stderr.getvalue())
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertTrue(retained)
+        self.assertTrue(removed)
+        self.assertTrue(external_retained)
+
+    def test_sync_all_prunes_removed_profile_source_without_touching_another_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            sources = {name: base / name for name in ("a", "b", "other")}
+            for name, root in sources.items():
+                skill = root / "skills" / name
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(name, encoding="utf-8")
+            destinations = {"focused": base / "focused", "other": base / "other-destination"}
+            config = base / "config.yaml"
+
+            def write_config(focused_sources: tuple[str, ...]) -> None:
+                bridges = "\n".join(f"  - name: {name}\n    path: {path}" for name, path in sources.items())
+                selected = "\n".join(f"      - bridge: {name}" for name in focused_sources)
+                config.write_text(
+                    f"""bridges:
+{bridges}
+ai_skill_paths:
+  focused: {destinations['focused']}
+  other: {destinations['other']}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+profile_sets:
+  focused:
+    destination: focused
+    sources:
+{selected}
+  other:
+    destination: other
+    sources:
+      - bridge: other
+""",
+                    encoding="utf-8",
+                )
+
+            write_config(("a", "b"))
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                initial_result = main(["--config", str(config), "sync", "all"])
+            write_config(("a",))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = main(["--config", str(config), "sync", "all"])
+            focused_b_removed = not (destinations["focused"] / "b").exists() and not (destinations["focused"] / "b").is_symlink()
+            other_retained = (destinations["other"] / "other").is_symlink()
+
+        self.assertEqual(initial_result, 0)
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertTrue(focused_b_removed)
+        self.assertTrue(other_retained)
+
+    def test_dormant_profile_group_allows_no_destinations_and_sync_all_skips_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "general"
+            skill = bridge / "skills" / "shared"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("shared", encoding="utf-8")
+            destination = base / "security-destination"
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: general
+    path: {bridge}
+ai_skill_paths:
+  security: {destination}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+profile_sets:
+  security:
+    destinations: [security]
+    sources:
+      - bridge: general
+  coding:
+    destinations: []
+    sources:
+      - bridge: general
+""",
+                encoding="utf-8",
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = main(["--config", str(config), "sync", "all"])
+
+            self.assertEqual(result, 0, stderr.getvalue())
+            self.assertTrue((destination / "shared").is_symlink())
+    def test_profile_groups_reject_destination_names_with_same_canonical_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "shared"
+            root.mkdir()
+            alias = base / "alias"
+            alias.symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(ConfigError, "share canonical root path"):
+                config_from_mapping(
+                    {
+                        "bridges": [{"name": "source", "path": str(base / "source")}],
+                        "ai_skill_paths": {"first": str(root), "second": str(alias)},
+                        "profile_sets": {
+                            "one": {"destination": "first", "sources": [{"bridge": "source"}]},
+                            "two": {"destination": "second", "sources": [{"bridge": "source"}]},
+                        },
+                    },
+                    base / "config.yaml",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

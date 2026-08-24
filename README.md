@@ -353,7 +353,14 @@ profile_sets:
 
 Every `ai_skill_paths` destination must be assigned exactly once across profile
 groups; unknown, duplicate, or competing destination assignments fail validation.
-Other destination/repo selector forms are rejected while profile sets are active,
+A group may intentionally declare `destinations: []` as a dormant template for a
+future agent; `sync all` skips it, and a focused `sync --profile <name>` reports
+that it has no destinations rather than falling back to default destinations.
+After a successful non-dry-run profile sync, `profile-projections.json` beside
+the config records that profile's canonical managed links. Removing a source
+later prunes only a still-matching recorded link; dry runs never write this
+manifest and first use never guesses legacy ownership. Other destination/repo
+selector forms are rejected while profile sets are active,
 which avoids bypassing their policy. Prefer repository-level selection: omit a
 dedicated job-search bridge from Claude/Codex rather than filtering a
 general-purpose bridge. For categorized bridges, omitting `include_categories`

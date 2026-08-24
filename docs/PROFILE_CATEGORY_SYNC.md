@@ -152,9 +152,15 @@ ai_skill_paths:
 Use plural `destinations` for groups, even when a group currently has one target.
 Legacy singular `destination` is accepted on input, but serialization emits the
 plural form. A destination must appear exactly once across active groups;
-unknown, repeated, competing, and unassigned destination names are errors.
-`sync all` expands every group to all of its destinations; `sync --profile
-security` expands only that group to all three destinations. When a categorized
+unknown, repeated, competing, and unassigned destination names are errors. A
+profile group may use `destinations: []` as a dormant template for a future
+agent; `sync all` skips it and a focused sync reports the missing destination
+instead of using defaults. `sync all` expands every active group to all of its destinations; `sync --profile
+security` expands only that group to all three destinations. A successful
+non-dry-run profile projection records its managed symlink targets in
+`profile-projections.json` beside the selected config. When a source is removed,
+only a still-matching recorded link can be pruned; dry runs and first use never
+guess legacy ownership. When a categorized
 source omits `include_categories`, it selects all categories. Set
 `include_categories` only to whitelist subtrees; `include_categories: all`
 remains an explicit compatibility spelling. `exclude_categories` applies in

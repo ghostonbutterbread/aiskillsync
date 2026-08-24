@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import subprocess
 import shutil
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 import re
+from typing import Any
 from urllib.parse import urlparse
 
-from .config import BridgeConfig, Config
+from .config import BridgeConfig, Config, atomic_write_text
 from .discovery import (
     BridgeDiscovery,
     DestinationStatus,
@@ -33,6 +35,8 @@ class SyncAction:
     skill: Skill
     status: DestinationStatus
     action: str
+    profile_name: str | None = None
+    managed_source_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,7 @@ class SyncPlan:
     errors: tuple[str, ...] = ()
     backup_root: Path | None = None
     duplicate_skills: dict[str, tuple[Skill, ...]] = field(default_factory=dict)
+    profile_name: str | None = None
 
     @property
     def has_blockers(self) -> bool:
@@ -234,6 +239,7 @@ def build_sync_plan(
     preflight_errors: tuple[str, ...] = (),
     skipped_missing_repos: tuple[str, ...] = (),
     backup_root: Path | None = None,
+    profile_name: str | None = None,
 ) -> SyncPlan:
     """Build a sync plan without mutating local repos or destination paths."""
 
@@ -372,10 +378,11 @@ def build_sync_plan(
                         skill=skill,
                         status=status,
                         action=action,
+                        profile_name=profile_name,
                     )
                 )
             if not include_skill_names and not exclude_skill_names:
-                actions.extend(_stale_managed_symlink_actions(dest_name, dest_root, selected))
+                actions.extend(_stale_managed_symlink_actions(dest_name, dest_root, selected, profile_name))
 
     return SyncPlan(
         dry_run=dry_run,
@@ -387,6 +394,7 @@ def build_sync_plan(
         errors=tuple(errors),
         backup_root=backup_root,
         duplicate_skills=duplicate_skills,
+        profile_name=profile_name,
     )
 
 
@@ -563,6 +571,152 @@ def apply_sync_plan(plan: SyncPlan) -> ApplyResult:
     return ApplyResult(created=tuple(created), pruned=tuple(pruned))
 
 
+def projection_manifest_path(config_path: Path) -> Path:
+    """Return the per-user projection state kept beside the selected config."""
+
+    return config_path.parent / "profile-projections.json"
+
+
+def add_profile_manifest_prunes(plan: SyncPlan, config_path: Path) -> SyncPlan:
+    """Add safe stale-entry prunes for a profile's previously recorded projection."""
+
+    if plan.profile_name is None:
+        return plan
+    manifest = _load_projection_manifest(projection_manifest_path(config_path))
+    desired = {
+        (_canonical_path(action.destination_root), action.skill.name)
+        for action in plan.actions
+        if action.action in {"link", "skip", "adopt"}
+    }
+    existing_paths = {_destination_action_path(action.status.path) for action in plan.prunes}
+    stale_actions: list[SyncAction] = []
+    for record in manifest.get("profiles", {}).get(plan.profile_name, []):
+        destination_root = Path(record["destination_root"])
+        entry = record["entry"]
+        target = Path(record["target"])
+        source_root = Path(record["source_root"])
+        if (_canonical_path(destination_root), entry) in desired:
+            continue
+        entry_path = destination_root / entry
+        if _destination_action_path(entry_path) in existing_paths:
+            continue
+        if not entry_path.is_symlink() or _canonical_path(entry_path) != target:
+            continue
+        if not _is_relative_to(target, source_root):
+            continue
+        bridge = BridgeConfig(name=plan.profile_name, repo=None, path=source_root, skills_path=".")
+        stale_actions.append(
+            SyncAction(
+                destination=plan.profile_name,
+                destination_root=destination_root,
+                skill=Skill(name=entry, bridge=bridge, path=target, skill_md=target / "SKILL.md"),
+                status=DestinationStatus(
+                    key="profile-stale-managed-symlink",
+                    label="profile stale managed symlink",
+                    path=entry_path,
+                    detail=f"{entry_path} -> {entry_path.readlink()}",
+                ),
+                action="prune",
+                profile_name=plan.profile_name,
+                managed_source_root=source_root,
+            )
+        )
+    return SyncPlan(
+        dry_run=plan.dry_run,
+        adopt=plan.adopt,
+        destinations=plan.destinations,
+        selected_discoveries=plan.selected_discoveries,
+        actions=(*plan.actions, *stale_actions),
+        notices=plan.notices,
+        errors=plan.errors,
+        backup_root=plan.backup_root,
+        duplicate_skills=plan.duplicate_skills,
+        profile_name=plan.profile_name,
+    )
+
+
+def remove_pruned_profile_manifest_records(plan: SyncPlan, config_path: Path) -> None:
+    """Forget only manifest entries whose recorded symlink was actually removed."""
+
+    pruned_by_profile: dict[str, set[tuple[Path, str]]] = {}
+    for action in plan.prunes:
+        if action.profile_name is not None:
+            pruned_by_profile.setdefault(action.profile_name, set()).add(
+                (_canonical_path(action.destination_root), action.skill.name)
+            )
+    if not pruned_by_profile:
+        return
+    path = projection_manifest_path(config_path)
+    manifest = _load_projection_manifest(path)
+    for profile_name, pruned in pruned_by_profile.items():
+        records = manifest["profiles"].get(profile_name, [])
+        manifest["profiles"][profile_name] = [
+            record for record in records
+            if (Path(record["destination_root"]), record["entry"]) not in pruned
+        ]
+    atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+def update_profile_projection_manifest(plan: SyncPlan, config_path: Path) -> None:
+    """Persist a profile's successful projection after all destination actions succeed."""
+
+    if plan.profile_name is None:
+        for profile_name in {action.profile_name for action in plan.actions if action.profile_name is not None}:
+            update_profile_projection_manifest(
+                SyncPlan(
+                    dry_run=plan.dry_run,
+                    adopt=plan.adopt,
+                    destinations=plan.destinations,
+                    selected_discoveries=plan.selected_discoveries,
+                    actions=tuple(action for action in plan.actions if action.profile_name == profile_name),
+                    profile_name=profile_name,
+                ),
+                config_path,
+            )
+        return
+    path = projection_manifest_path(config_path)
+    manifest = _load_projection_manifest(path)
+    profiles = manifest.setdefault("profiles", {})
+    records = profiles.setdefault(plan.profile_name, [])
+    pruned = {(_canonical_path(action.destination_root), action.skill.name) for action in plan.prunes}
+    desired = [
+        {
+            "destination_root": str(_canonical_path(action.destination_root)),
+            "entry": action.skill.name,
+            "target": str(_canonical_path(action.skill.path)),
+            "source_root": str(_canonical_path(action.skill.bridge.skills_dir)),
+        }
+        for action in plan.actions
+        if action.action in {"link", "skip", "adopt"}
+    ]
+    desired_keys = {(Path(record["destination_root"]), record["entry"]) for record in desired}
+    retained = [
+        record for record in records
+        if (Path(record["destination_root"]), record["entry"]) not in pruned
+        and (Path(record["destination_root"]), record["entry"]) not in desired_keys
+    ]
+    profiles[plan.profile_name] = [*retained, *desired]
+    atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
+def _load_projection_manifest(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"version": 1, "profiles": {}}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read profile projection manifest {path}: {exc}") from exc
+    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("profiles"), dict):
+        raise ValueError(f"invalid profile projection manifest: {path}")
+    for records in value["profiles"].values():
+        if not isinstance(records, list) or any(
+            not isinstance(record, dict)
+            or not all(isinstance(record.get(key), str) and record[key] for key in ("destination_root", "entry", "target", "source_root"))
+            for record in records
+        ):
+            raise ValueError(f"invalid profile projection manifest: {path}")
+    return value
+
+
 def apply_prune_actions(plan: SyncPlan) -> tuple[str, ...]:
     """Remove stale managed symlinks even when unrelated sync blockers exist."""
 
@@ -595,7 +749,7 @@ def apply_prune_actions(plan: SyncPlan) -> tuple[str, ...]:
 
 
 def _stale_managed_symlink_actions(
-    dest_name: str, dest_root: Path, discoveries: tuple[BridgeDiscovery, ...]
+    dest_name: str, dest_root: Path, discoveries: tuple[BridgeDiscovery, ...], profile_name: str | None = None
 ) -> tuple[SyncAction, ...]:
     if not dest_root.is_dir():
         return ()
@@ -651,6 +805,7 @@ def _stale_managed_symlink_actions(
                         detail=f"{entry} -> {entry.readlink()}",
                     ),
                     action="prune",
+                    profile_name=profile_name,
                 )
             )
             break
@@ -661,6 +816,10 @@ def _is_stale_managed_symlink(action: SyncAction) -> bool:
     path = action.status.path
     if not path.is_symlink():
         return False
+    if action.managed_source_root is not None:
+        return _canonical_path(path) == _canonical_path(action.skill.path) and _is_relative_to(
+            _canonical_path(action.skill.path), _canonical_path(action.managed_source_root)
+        )
     target = _canonical_path(path)
     skills_root = _canonical_path(action.skill.bridge.skills_dir)
     current_source = skills_root / path.name / "SKILL.md"

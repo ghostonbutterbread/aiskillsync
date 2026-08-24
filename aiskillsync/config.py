@@ -121,6 +121,15 @@ def expand_path(value: str | Path) -> Path:
     return Path(os.path.expandvars(str(value))).expanduser()
 
 
+def canonical_path(path: Path) -> Path:
+    """Resolve existing aliases while retaining a usable path for absent roots."""
+
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path.absolute()
+
+
 def default_config_path() -> Path:
     return expand_path(DEFAULT_CONFIG_PATH)
 
@@ -284,10 +293,10 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             profile_destinations = (require_string(profile_raw, "destination", f"profile_sets.{profile_name}"),)
         elif has_destinations:
             destinations_value = profile_raw["destinations"]
-            if not isinstance(destinations_value, (list, tuple)) or not destinations_value or not all(
+            if not isinstance(destinations_value, (list, tuple)) or not all(
                 isinstance(value, str) and value for value in destinations_value
             ):
-                raise ConfigError(f"profile_sets.{profile_name}.destinations must be a non-empty list of destination names")
+                raise ConfigError(f"profile_sets.{profile_name}.destinations must be a list of destination names")
             profile_destinations = tuple(destinations_value)
         else:
             raise ConfigError(f"profile_sets.{profile_name} must supply destination or destinations")
@@ -349,6 +358,18 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             raise ConfigError(
                 "destination assigned by more than one profile set: "
                 + ", ".join(sorted(set(duplicate_assignments)))
+            )
+        canonical_owners: dict[Path, str] = {}
+        shared_roots: list[str] = []
+        for destination, owner in destination_owners.items():
+            root = canonical_path(destinations[destination])
+            if root in canonical_owners:
+                shared_roots.append(f"{canonical_owners[root]}, {destination} ({root})")
+            else:
+                canonical_owners[root] = destination
+        if shared_roots:
+            raise ConfigError(
+                "profile set destinations share canonical root path: " + "; ".join(shared_roots)
             )
         assigned_destinations = set(destination_owners)
         unassigned_destinations = sorted(set(destinations) - assigned_destinations)

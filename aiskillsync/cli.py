@@ -44,12 +44,15 @@ from .lanes import effective_config, load_active_lanes, resolve_switch, save_act
 from .sync import (
     SyncAction,
     SyncPlan,
+    add_profile_manifest_prunes,
     apply_prune_actions,
     apply_sync_plan,
     build_sync_plan,
     make_backup_root,
     materialize_repositories_for_sync,
+    remove_pruned_profile_manifest_records,
     select_bridge_configs,
+    update_profile_projection_manifest,
 )
 
 
@@ -68,6 +71,7 @@ class SyncRequest:
     errors: tuple[str, ...] = ()
     category_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
     exclude_category_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    profile_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -709,6 +713,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         if plan.prunes and not dry_run:
             try:
                 pruned = apply_prune_actions(plan)
+                remove_pruned_profile_manifest_records(plan, config.path)
             except (OSError, ValueError) as exc:
                 print(f"aiskillsync: prune failed: {exc}", file=stderr)
                 _print_sync_summary(plan, "blocked", stdout)
@@ -727,6 +732,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
 
     try:
         result = apply_sync_plan(plan)
+        update_profile_projection_manifest(plan, config.path)
     except (OSError, ValueError) as exc:
         print(f"aiskillsync: apply failed: {exc}", file=stderr)
         _print_sync_summary(plan, "blocked", stdout)
@@ -893,7 +899,11 @@ def _resolve_sync_requests(config: Config, args: argparse.Namespace) -> tuple[Sy
         return (_resolve_sync_request(config, args),)
     if config.profile_sets:
         if tuple(args.terms) == ("all",) and not args.repo and not args.dest:
-            return tuple(_profile_sync_request(config, profile) for profile in config.profile_sets)
+            return tuple(
+                _profile_sync_request(config, profile)
+                for profile in config.profile_sets
+                if profile.destinations
+            )
         return (
             SyncRequest(
                 config=config,
@@ -906,6 +916,13 @@ def _resolve_sync_requests(config: Config, args: argparse.Namespace) -> tuple[Sy
 
 
 def _profile_sync_request(config: Config, profile: ProfileSetConfig) -> SyncRequest:
+    if not profile.destinations:
+        return SyncRequest(
+            config=config,
+            repo_selectors=(),
+            destinations=(),
+            errors=(f"PROFILE {profile.name}: no destinations configured",),
+        )
     selectors: list[str] = []
     categories: dict[str, tuple[str, ...]] = {}
     excluded_categories: dict[str, tuple[str, ...]] = {}
@@ -920,6 +937,7 @@ def _profile_sync_request(config: Config, profile: ProfileSetConfig) -> SyncRequ
         notices=(f"PROFILE {profile.name}: destinations {', '.join(profile.destinations)}",),
         category_filters=categories,
         exclude_category_filters=excluded_categories,
+        profile_name=profile.name,
     )
 
 
@@ -961,9 +979,11 @@ def _build_sync_requests_plan(
             preflight_errors=(*request.errors, *(preflight_errors if index == 0 else ())),
             skipped_missing_repos=skipped_missing_repos,
             backup_root=backup_root,
+            profile_name=request.profile_name,
         )
         for index, request in enumerate(requests)
     )
+    plans = tuple(add_profile_manifest_prunes(plan, request.config.path) for plan, request in zip(plans, requests))
     return SyncPlan(
         dry_run=dry_run,
         adopt=adopt,
