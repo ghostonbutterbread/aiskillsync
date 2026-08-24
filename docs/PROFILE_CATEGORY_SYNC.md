@@ -1,6 +1,6 @@
 # Profile-Scoped Category Sync — Draft Design
 
-**Status:** draft proposal; no runtime behavior changes in this document.
+**Status:** implemented core feature (`aiskillsync` 0.1.7); repository category migrations and profile activation remain planned.
 
 ## Goal
 
@@ -106,9 +106,11 @@ general-skills/
       email-triage/SKILL.md
 ```
 
-The category is the source-relative directory prefix. For example,
-`career/job-search` belongs to the `career` category under the configured
-`general-skills` bridge.
+The category is the source-relative directory prefix. Selectors are subtree
+prefixes, bounded on directory segments: `security` selects `security` and all
+of its nested category paths, while `security/impact-reporting` selects only
+that branch. For example, `career/job-search` belongs to the `career` category
+under the configured `general-skills` bridge.
 
 Skill `name` values remain globally unique across all selected bridges. The
 syncer must reject ambiguous duplicate names even if their source directories
@@ -159,12 +161,26 @@ ai_skill_paths:
   hermes-hunter: ~/.hermes/profiles/hunter/synced-skills
 ```
 
-Policy categories are capability-oriented, not a claim that all policies are
-security or coding policies. `universal` contains the small cross-agent baseline
-that every role needs; specialized policy categories such as `coding`,
-`security`, `research`, or `communications` are selected only where applicable.
-A policy remains canonical in `ai-policies` and is projected to multiple agents
-as symlinks rather than copied into role repositories.
+Policy categories are capability-oriented. `universal` contains the small
+cross-agent baseline that every role needs; `coding` remains a sibling category.
+Security policy is one parent category with nested, independently selectable
+branches, rather than a collection of unrelated top-level security labels:
+
+```text
+skills/
+  universal/
+  coding/
+  security/
+    core/
+    discovery/
+    live-testing/
+    impact-reporting/
+```
+
+Selecting `security` deliberately projects every nested security policy.
+Selecting `security/impact-reporting` projects only that branch. A policy
+remains canonical in `ai-policies` and is projected to multiple agents as
+symlinks rather than copied into role repositories.
 
 `include_categories` values are relative to the named bridge's `skills_path`.
 A value selects its full subtree. An omitted `include_categories` preserves
@@ -176,6 +192,88 @@ form `bridge:relative/path` and are evaluated after category selection:
 - `include_skills` adds a narrowly justified exception;
 - `exclude_skills` removes a selected skill; and
 - both are reported in the receipt.
+
+## Approved Initial Migration Map
+
+This map is a reviewed placement proposal; it is not a file move. Keep BBH as
+the canonical owner for the two listed security-support capabilities.
+
+### `general-skills`
+
+```text
+core/
+  safe-fetch, faq, papercuts, coordination, skill-seeds
+operations/
+  tmux, hoster-ssh, script-manager, resilio-sync, daddy
+accounts/
+  account-manager, bitwarden, account-tui-colors, gmail-otp
+learning/
+  nightly-learning, i-have-adhd
+```
+
+Move `bounty-storage` and `huge-ingest` into BBH rather than leaving them in
+`general-skills`. Their helpers, tests, documentation, and source references
+move with the canonical skill so only one runnable copy remains.
+
+### `ai-policies`
+
+```text
+universal/
+  policy-authoring, resource-safety-policy, public-forums,
+  social-integration-policy, email-access-policy, browser-session-policy,
+  proxy-routing-policy, desktop-mobile-amplifier-policy
+coding/
+  coding-policy, coding-reliability-policy, coding-maintainability-policy,
+  coding-agent-operations-policy, coding-proportionality-policy,
+  coding-spec-lifecycle-policy, coding-proposal-packets-policy
+security/
+  core/
+    general-security-testing-policy, live-testing-policy,
+    program-testing-policy, account-testing-policy, attempt-recording-policy,
+    bounty-directory-structure-policy
+  discovery/
+    hunt-orchestration-policy, hypothesis-expansion-policy,
+    class-derivation-policy, impact-fit-policy, recon-corpus-write-policy
+  live-testing/
+    http-status-live-policy, http-error-live-policy, injection-testing-policy,
+    idor-live-policy, race-live-policy, waf-live-policy,
+    hypothesis-live-testing, electron-live-testing-policy,
+    payment-testing-policy
+  impact-reporting/
+    poc-tooling-policy
+```
+
+## Relocation Reference Audit
+
+A category migration is incomplete until every canonical pointer resolves at
+its new path. Before moving a directory, inventory references in the source
+repository and all configured skill source repositories, then update paths in
+the same coherent migration change. The current `ai-policies` audit already
+identifies path-sensitive owners:
+
+- `scripts/policy_lint.py` embeds policy skill paths and must be made
+  category-aware (or preferably discover the named canonical directory);
+- `README.md`, `GENERAL.md`, `docs/policy-authoring.md`, and the `policies/`
+  documents link directly to skills;
+- `policies/bug-bounty/electron-application-first-loose.json` names the Electron
+  policy path;
+- individual policy `related_skills`, reference documents, script READMEs, and
+  root-context routing must be searched and updated after every move.
+
+Required migration receipt:
+
+1. record old path → new path for every moved skill, including cross-repository
+   moves to BBH;
+2. search canonical repositories for every old path and old skill-root reference;
+3. patch links, lint constants, scripts, docs, root-context routers, and
+   cross-skill pointers in the same branch;
+4. run each repository's tests/lints plus a repository-wide check that no old
+   path remains outside the migration receipt/history;
+5. run `aiskillsync doctor` and a focused dry-run, verify every projection
+   resolves to the new canonical directory, then load representative skills in
+   fresh profiles;
+6. remove the old canonical directory only after the new source, references,
+   and projections verify. Do not leave a second executable copy as a redirect.
 
 ## Proposed CLI
 
