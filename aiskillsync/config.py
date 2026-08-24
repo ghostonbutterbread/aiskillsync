@@ -88,6 +88,7 @@ class SyncConfig:
 class ProfileSourceConfig:
     bridge: str
     include_categories: tuple[str, ...] = ()
+    exclude_categories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -276,17 +277,41 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         if not isinstance(sources_raw, list) or not sources_raw:
             raise ConfigError(f"profile_sets.{profile_name}.sources must be a non-empty list")
         sources: list[ProfileSourceConfig] = []
+        source_bridges: set[str] = set()
         for index, source_raw in enumerate(sources_raw, start=1):
             if not isinstance(source_raw, dict):
                 raise ConfigError(f"profile_sets.{profile_name}.sources[{index}] must be a mapping")
             bridge_name = require_string(source_raw, "bridge", f"profile_sets.{profile_name}.sources[{index}]")
             if bridge_name not in bridge_names:
                 raise ConfigError(f"profile_sets.{profile_name}.sources[{index}] names unknown bridge: {bridge_name}")
+            if bridge_name in source_bridges:
+                raise ConfigError(f"profile_sets.{profile_name} names bridge more than once: {bridge_name}")
+            source_bridges.add(bridge_name)
             categories = source_raw.get("include_categories", [])
-            if not isinstance(categories, list) or not all(isinstance(value, str) and value for value in categories):
-                raise ConfigError(f"profile_sets.{profile_name}.sources[{index}].include_categories must be a list of strings")
-            sources.append(ProfileSourceConfig(bridge_name, tuple(categories)))
+            if categories == "all":
+                categories = ("all",)
+            if not isinstance(categories, (list, tuple)) or not all(isinstance(value, str) and value for value in categories):
+                raise ConfigError(
+                    f"profile_sets.{profile_name}.sources[{index}].include_categories must be 'all' or a list of strings"
+                )
+            if "all" in categories and tuple(categories) != ("all",):
+                raise ConfigError(
+                    f"profile_sets.{profile_name}.sources[{index}].include_categories cannot mix 'all' with named categories"
+                )
+            excluded_categories = source_raw.get("exclude_categories", [])
+            if not isinstance(excluded_categories, list) or not all(isinstance(value, str) and value for value in excluded_categories):
+                raise ConfigError(f"profile_sets.{profile_name}.sources[{index}].exclude_categories must be a list of strings")
+            sources.append(ProfileSourceConfig(bridge_name, tuple(categories), tuple(excluded_categories)))
         profile_sets.append(ProfileSetConfig(profile_name, destination, tuple(sources)))
+
+    if profile_sets:
+        assigned_destinations = {profile.destination for profile in profile_sets}
+        unassigned_destinations = sorted(set(destinations) - assigned_destinations)
+        if unassigned_destinations:
+            raise ConfigError(
+                "profile_sets are active; every ai_skill_paths destination must be assigned: "
+                + ", ".join(unassigned_destinations)
+            )
 
     sync_raw = raw.get("sync", {})
     if sync_raw is None:
@@ -384,9 +409,15 @@ def config_to_text(config: Config) -> str:
             lines.append("    sources:")
             for source in profile.sources:
                 lines.append(f"      - bridge: {_format_scalar(source.bridge)}")
-                if source.include_categories:
+                if source.include_categories == ("all",):
+                    lines.append("        include_categories: all")
+                elif source.include_categories:
                     lines.append("        include_categories:")
                     for category in source.include_categories:
+                        lines.append(f"          - {_format_scalar(category)}")
+                if source.exclude_categories:
+                    lines.append("        exclude_categories:")
+                    for category in source.exclude_categories:
                         lines.append(f"          - {_format_scalar(category)}")
 
     lines.append("")

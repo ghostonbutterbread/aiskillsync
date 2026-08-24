@@ -229,6 +229,7 @@ def build_sync_plan(
     include_skills: tuple[str, ...] = (),
     exclude_skills: tuple[str, ...] = (),
     category_filters: dict[str, tuple[str, ...]] | None = None,
+    exclude_category_filters: dict[str, tuple[str, ...]] | None = None,
     preflight_notices: tuple[str, ...] = (),
     preflight_errors: tuple[str, ...] = (),
     skipped_missing_repos: tuple[str, ...] = (),
@@ -246,6 +247,7 @@ def build_sync_plan(
     include_skill_names = set(include_skills)
     exclude_skill_names = set(exclude_skills)
     category_filters = category_filters or {}
+    exclude_category_filters = exclude_category_filters or {}
     selected_skills: list[Skill] = []
 
     for discovery in selected:
@@ -281,13 +283,16 @@ def build_sync_plan(
             )
             continue
         categories = category_filters.get(bridge.name, ())
-        if categories and bridge.skill_layout != "categorized":
+        if categories == ("all",):
+            categories = ()
+        excluded_categories = exclude_category_filters.get(bridge.name, ())
+        if (categories or excluded_categories) and bridge.skill_layout != "categorized":
             errors.append(
                 f"categories can only be selected from categorized bridge {bridge.name}"
             )
             continue
         available_categories = {skill.category for skill in discovery.skills}
-        for category in categories:
+        for category in (*categories, *excluded_categories):
             if not any(
                 available == category or available.startswith(f"{category}/")
                 for available in available_categories
@@ -310,7 +315,11 @@ def build_sync_plan(
         selected_skills.extend(
             skill
             for skill in discovered_skills
-            if (not include_skill_names or skill.name in include_skill_names)
+            if not any(
+                skill.category == category or skill.category.startswith(f"{category}/")
+                for category in excluded_categories
+            )
+            and (not include_skill_names or skill.name in include_skill_names)
             and skill.name not in exclude_skill_names
         )
 

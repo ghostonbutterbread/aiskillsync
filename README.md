@@ -10,7 +10,9 @@ provider skill directories.
 
 `aiskillsync` supports both flat and categorized source bridges. A categorized
 bridge recursively discovers `SKILL.md` files and lets a named profile set select
-a full category subtree; a flat bridge keeps the existing direct-child behavior.
+a full category subtree. Profile sets are destination projections for any target
+(including Codex and Claude), not just Hermes profiles. A flat bridge keeps the
+existing direct-child behavior.
 See [Profile-scoped category sync](docs/PROFILE_CATEGORY_SYNC.md) for the
 configuration and migration contract.
 
@@ -321,9 +323,9 @@ The command replaces only the `AIPOLICIES_MANAGED` block when the target file
 already has one. If the target exists without that block, the managed block is
 appended so local provider-specific context is preserved.
 
-The old repo-first selector syntax remains supported. `sync all` still means all
-repos into `sync.default_destinations`, and repeated `--dest` flags still
-select legacy destinations:
+The old repo-first selector syntax remains supported. Without `profile_sets`,
+`sync all` means all repos into `sync.default_destinations`, and repeated
+`--dest` flags still select legacy destinations:
 
 ```bash
 aiskillsync sync all
@@ -331,6 +333,16 @@ aiskillsync sync bounty-harness
 aiskillsync sync 1 2
 aiskillsync sync bounty-harness --dest codex --dest claude
 ```
+
+When `profile_sets` is configured, `sync all` expands every profile set
+independently instead: each set chooses its destination and source policy, so
+skills are not broadcast across destinations. Every `ai_skill_paths` destination
+must be assigned to at least one profile set; otherwise config validation fails.
+Use `sync --profile <name>` to select one projection. Other destination/repo
+selector forms are rejected while profile sets are active, which avoids bypassing
+their policy. A broad Codex or Claude projection can use `include_categories: all`
+and then exclude only categories it must not receive (for example, `career`),
+while a focused Hermes role normally declares `include_categories` as a whitelist.
 
 Focused skill filters:
 

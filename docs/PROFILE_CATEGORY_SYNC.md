@@ -118,8 +118,10 @@ are different.
 
 ## Proposed Configuration
 
-Add an optional `profile_sets` section. It may select categorized bridges by
-source-directory category and may include a flat bridge unchanged:
+Add an optional `profile_sets` section. A profile set is a destination projection,
+not a Hermes-only concept: it may target Hermes, Codex, Claude, or any configured
+`ai_skill_paths` destination. It may select categorized bridges by source-directory
+category and may include a flat bridge unchanged:
 
 ```yaml
 profile_sets:
@@ -183,8 +185,21 @@ remains canonical in `ai-policies` and is projected to multiple agents as
 symlinks rather than copied into role repositories.
 
 `include_categories` values are relative to the named bridge's `skills_path`.
-A value selects its full subtree. An omitted `include_categories` preserves
-current bridge-wide sync behavior for backward compatibility.
+A named value selects its full subtree. The scalar `include_categories: all`
+explicitly selects every category in a categorized bridge; it is the preferred
+broad-profile form. `exclude_categories` is then applied to remove complete
+category subtrees. This permits broad CLI projections such as Codex/Claude to
+exclude `career`, while focused Hermes roles can retain a strict
+`include_categories` whitelist. Category include/exclude selectors are invalid
+for flat bridges, which remain bridge-wide unless explicit skill filters are used.
+
+When no profile sets exist, `sync all` retains legacy behavior: all selected
+bridges fan out to `sync.default_destinations`. When one or more profile sets
+exist, `sync all` expands every profile independently and does not perform that
+broadcast. Every configured destination must be assigned by at least one profile
+set; an unassigned destination is a config error. `sync --profile <name>` runs
+one projection, while ordinary destination/repo selectors are rejected when
+profile sets are active so they cannot bypass the configured policy.
 
 `include_skills` and `exclude_skills` are source-qualified identifiers in the
 form `bridge:relative/path` and are evaluated after category selection:

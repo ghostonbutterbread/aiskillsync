@@ -20,6 +20,7 @@ from .config import (
     ConfigError,
     DEFAULT_CONFIG_TEXT,
     DEFAULT_REPO_DIR,
+    ProfileSetConfig,
     _format_scalar,
     _split_key_value,
     _strip_inline_comment,
@@ -66,6 +67,7 @@ class SyncRequest:
     notices: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     category_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    exclude_category_filters: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -656,7 +658,8 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         )
         return 2
 
-    request = _resolve_sync_request(config, args)
+    requests = _resolve_sync_requests(config, args)
+    request = _combine_sync_requests(requests)
     dry_run = args.dry_run
     adopt = args.adopt or args.overwrite_local_copies
     denylist, denylist_errors = _sync_denylist(config, args)
@@ -676,24 +679,11 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         skip_clone_bridges=frozenset(repo_preflight.skip_clone_bridges),
         skip_pull_bridges=frozenset(repo_preflight.skip_pull_bridges),
     )
-    plan = build_sync_plan(
-        request.config,
-        request.repo_selectors,
-        request.destinations,
-        dry_run=dry_run,
-        adopt=adopt,
-        include_skills=tuple(args.skill),
-        exclude_skills=denylist,
-        category_filters=request.category_filters,
-        preflight_notices=(*request.notices, *repo_preflight.notices, *materialization.notices),
-        preflight_errors=(
-            *request.errors,
-            *denylist_errors,
-            *repo_preflight.errors,
-            *materialization.errors,
-        ),
+    plan = _build_sync_requests_plan(
+        requests, args, dry_run=dry_run, adopt=adopt, denylist=denylist, backup_root=backup_root,
+        preflight_notices=(*repo_preflight.notices, *materialization.notices),
+        preflight_errors=(*denylist_errors, *repo_preflight.errors, *materialization.errors),
         skipped_missing_repos=materialization.skipped_missing_roots,
-        backup_root=backup_root,
     )
     if (
         not dry_run
@@ -706,29 +696,12 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     ):
         adopt = True
         backup_root = make_backup_root()
-        plan = build_sync_plan(
-            request.config,
-            request.repo_selectors,
-            request.destinations,
-            dry_run=dry_run,
-            adopt=True,
-            include_skills=tuple(args.skill),
-            exclude_skills=denylist,
-            category_filters=request.category_filters,
-            preflight_notices=(
-                *request.notices,
-                *repo_preflight.notices,
-                *materialization.notices,
-                "WARN destination conflicts accepted for overwrite; existing entries will be backed up first",
-            ),
-            preflight_errors=(
-                *request.errors,
-                *denylist_errors,
-                *repo_preflight.errors,
-                *materialization.errors,
-            ),
+        plan = _build_sync_requests_plan(
+            requests, args, dry_run=dry_run, adopt=True, denylist=denylist, backup_root=backup_root,
+            preflight_notices=(*repo_preflight.notices, *materialization.notices,
+                               "WARN destination conflicts accepted for overwrite; existing entries will be backed up first"),
+            preflight_errors=(*denylist_errors, *repo_preflight.errors, *materialization.errors),
             skipped_missing_repos=materialization.skipped_missing_roots,
-            backup_root=backup_root,
         )
     _print_sync_plan(plan, stdout, verbosity=args.verbose)
 
@@ -915,6 +888,97 @@ def _read_skill_denylist(path: Path) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _resolve_sync_requests(config: Config, args: argparse.Namespace) -> tuple[SyncRequest, ...]:
+    if getattr(args, "profile", None):
+        return (_resolve_sync_request(config, args),)
+    if config.profile_sets:
+        if tuple(args.terms) == ("all",) and not args.repo and not args.dest:
+            return tuple(_profile_sync_request(config, profile) for profile in config.profile_sets)
+        return (
+            SyncRequest(
+                config=config,
+                repo_selectors=(),
+                destinations=(),
+                errors=("profile_sets are active; use 'sync all' or '--profile <name>'",),
+            ),
+        )
+    return (_resolve_sync_request(config, args),)
+
+
+def _profile_sync_request(config: Config, profile: ProfileSetConfig) -> SyncRequest:
+    selectors: list[str] = []
+    categories: dict[str, tuple[str, ...]] = {}
+    excluded_categories: dict[str, tuple[str, ...]] = {}
+    for source in profile.sources:
+        selectors.append(source.bridge)
+        categories[source.bridge] = source.include_categories
+        excluded_categories[source.bridge] = source.exclude_categories
+    return SyncRequest(
+        config=config,
+        repo_selectors=tuple(selectors),
+        destinations=(profile.destination,),
+        notices=(f"PROFILE {profile.name}: destination {profile.destination}",),
+        category_filters=categories,
+        exclude_category_filters=excluded_categories,
+    )
+
+
+def _combine_sync_requests(requests: tuple[SyncRequest, ...]) -> SyncRequest:
+    first = requests[0]
+    return SyncRequest(
+        config=first.config,
+        repo_selectors=tuple(dict.fromkeys(selector for request in requests for selector in request.repo_selectors)),
+        destinations=tuple(dict.fromkeys(destination for request in requests for destination in request.destinations)),
+        notices=tuple(notice for request in requests for notice in request.notices),
+        errors=tuple(error for request in requests for error in request.errors),
+    )
+
+
+def _build_sync_requests_plan(
+    requests: tuple[SyncRequest, ...],
+    args: argparse.Namespace,
+    *,
+    dry_run: bool,
+    adopt: bool,
+    denylist: tuple[str, ...],
+    backup_root: Path | None,
+    preflight_notices: tuple[str, ...],
+    preflight_errors: tuple[str, ...],
+    skipped_missing_repos: tuple[str, ...],
+) -> SyncPlan:
+    plans = tuple(
+        build_sync_plan(
+            request.config,
+            request.repo_selectors,
+            request.destinations,
+            dry_run=dry_run,
+            adopt=adopt,
+            include_skills=tuple(args.skill),
+            exclude_skills=denylist,
+            category_filters=request.category_filters,
+            exclude_category_filters=request.exclude_category_filters,
+            preflight_notices=(*request.notices, *(preflight_notices if index == 0 else ())),
+            preflight_errors=(*request.errors, *(preflight_errors if index == 0 else ())),
+            skipped_missing_repos=skipped_missing_repos,
+            backup_root=backup_root,
+        )
+        for index, request in enumerate(requests)
+    )
+    return SyncPlan(
+        dry_run=dry_run,
+        adopt=adopt,
+        destinations=tuple(dict.fromkeys(destination for plan in plans for destination in plan.destinations)),
+        selected_discoveries=tuple(
+            dict.fromkeys(discovery for plan in plans for discovery in plan.selected_discoveries)
+        ),
+        actions=tuple(action for plan in plans for action in plan.actions),
+        notices=tuple(notice for plan in plans for notice in plan.notices),
+        errors=tuple(error for plan in plans for error in plan.errors),
+        backup_root=backup_root,
+        duplicate_skills={name: skills for plan in plans for name, skills in plan.duplicate_skills.items()},
+    )
+
+
 def _resolve_sync_request(config: Config, args: argparse.Namespace) -> SyncRequest:
     profile_name = getattr(args, "profile", None)
     if profile_name:
@@ -933,19 +997,7 @@ def _resolve_sync_request(config: Config, args: argparse.Namespace) -> SyncReque
                 destinations=(),
                 errors=(f"unknown profile: {profile_name}",),
             )
-        categories: dict[str, list[str]] = {}
-        selectors: list[str] = []
-        for source in profile.sources:
-            if source.bridge not in selectors:
-                selectors.append(source.bridge)
-            categories.setdefault(source.bridge, []).extend(source.include_categories)
-        return SyncRequest(
-            config=config,
-            repo_selectors=tuple(selectors),
-            destinations=(profile.destination,),
-            notices=(f"PROFILE {profile.name}: destination {profile.destination}",),
-            category_filters={name: tuple(dict.fromkeys(values)) for name, values in categories.items()},
-        )
+        return _profile_sync_request(config, profile)
 
     terms = tuple(args.terms)
     repo_options = tuple(args.repo)
