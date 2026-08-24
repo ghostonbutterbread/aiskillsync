@@ -228,6 +228,18 @@ aiskillsync external add https://github.com/SimoneAvogadro/android-reverse-engin
 aiskillsync sync all --repo android-reverse-engineering --dry-run -v
 ```
 
+`skills_path` names the directory whose immediate child directories are skills.
+Each child that contains `SKILL.md` is projected separately to every selected
+agent runtime, together with its references and scripts. A normal skills
+repository therefore needs no option (`skills_path: skills` is the default);
+plugin and marketplace repositories use `--skills-path` to select the nested
+skill root deliberately.
+
+The explicit root is part of external-source review: reviewers must confirm it
+matches the intended plugin/marketplace entry and enumerate the discovered
+skill names before activation. This permits one upstream source to supply
+multiple skills without recursively importing unrelated `SKILL.md` files.
+
 ## Policy Lanes: stable and beta
 
 A **bridge** is one checked-out skill source. For a repository that needs a

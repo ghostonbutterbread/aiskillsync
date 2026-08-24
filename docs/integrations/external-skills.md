@@ -20,11 +20,14 @@ Keep externally maintained skills distinct from team-owned source checkouts whil
 
 - Focused CLI test covers add, config persistence, nested skill discovery, and symlink projection.
 - Full suite: `python3 -m unittest discover -s tests -v` — 79 passing.
-- CLI/version smoke: `python3 -m aiskillsync --version` reports `0.1.5`; `external --help` and bytecode compilation pass.
+- CLI/version smoke: `python3 -m aiskillsync --version` reports `0.1.6`; `external --help` and bytecode compilation pass.
 
 ## Deferred
 
 `TODO.md` records the next slice: review external diffs with deterministic indicators and an AI gate before promotion. This feature intentionally does not gate the existing automatic update path.
+
+The review receipt now explicitly includes the selected `skills_path`, its
+plugin/marketplace provenance, and the complete discovered skill list.
 
 ## Activation boundary
 

@@ -505,6 +505,7 @@ sync:
             source_root = config.parent / "external" / "plugins" / "android-skill"
             source = source_root / "plugins" / "android" / "skills"
             self.write_skill(source, "android-reverse-engineering")
+            self.write_skill(source, "android-api-notes")
             subprocess.run(
                 ["git", "init", "--initial-branch=master", str(source_root)],
                 check=True,
@@ -516,7 +517,9 @@ sync:
                 "--config", str(config), "sync", "codex", "--repo", "android-skill"
             )
             link = codex / "android-reverse-engineering"
+            second_link = codex / "android-api-notes"
             target = link.resolve() if link.is_symlink() else None
+            second_target = second_link.resolve() if second_link.is_symlink() else None
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Added external source android-skill", result.stdout)
@@ -526,7 +529,9 @@ sync:
         self.assertIn("branch: master", content)
         self.assertEqual(sync_result.returncode, 0, sync_result.stdout + sync_result.stderr)
         self.assertIn("LINK codex:android-reverse-engineering", sync_result.stdout)
+        self.assertIn("LINK codex:android-api-notes", sync_result.stdout)
         self.assertEqual(target, (source / "android-reverse-engineering").resolve())
+        self.assertEqual(second_target, (source / "android-api-notes").resolve())
 
     def test_repo_add_without_repo_dir_defaults_to_config_aiskillsync_repos_not_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
