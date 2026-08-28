@@ -201,6 +201,10 @@ names, still affects the exit status.
 
 ## Repo Management
 
+For an ordinary skill repository, add one bridge and sync it. It remains on its
+configured branch; it does not need a lane unless stable/beta alternatives must
+be selectable.
+
 Add a repo URL to the config. If no local location is given, aiskillsync uses
 `repo_dir/<repo-name>`; by default `repo_dir` is
 `~/.config/aiskillsync/repos`. This updates config only; the repo is cloned on
@@ -251,6 +255,22 @@ lanes:
 ```
 
 Only the active bridge for each lane group participates in normal `sync`.
+
+### BBH shared launcher projection
+
+BBH is the one application integration currently supported alongside skill
+projection. Add a local-only `bbh_launcher_path` when its lane group selects
+separate stable/beta BBH checkouts:
+
+```yaml
+bbh_launcher_path: ~/.local/bin/bbh
+```
+
+On a successful BBH lane switch, aiskillsync atomically repoints that symlink to
+the selected checkout's `scripts/bbh`. The launcher then resolves BBH scripts
+and its checkout-local `.venv` itself. Do not use this field for ordinary skill
+repositories or as a general dependency manager.
+
 Repositories outside `lanes` retain the ordinary configured-branch behavior.
 A branch-configured bridge must be checked out on its configured branch before
 sync can pull, discover, or link skills; a mismatch blocks the run.
