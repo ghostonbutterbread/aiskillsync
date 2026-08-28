@@ -5,6 +5,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from aiskillsync.cli import main
@@ -91,7 +92,8 @@ sync:
             self.assertEqual(main(["--config", str(config), "switch", "beta"]), 0)
             self.assertEqual((base / "destination" / "shared").resolve(), base / "beta" / "skills" / "shared")
             self.assertFalse((base / "destination" / "removed").exists())
-            self.assertIn('"beta"', (base / "lanes-state.json").read_text(encoding="utf-8"))
+            state = json.loads((base / "active-stack.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["lanes"], {"policies": "beta"})
 
     def test_switch_writes_resolved_runtime_context(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -111,6 +113,34 @@ sync:
             self.assertEqual(context["projects"]["policies"]["root"], str((base / "beta").resolve()))
             self.assertEqual(context["projects"]["policies"]["branch"], "beta")
             self.assertTrue(context["projects"]["policies"]["revision"])
+
+    def test_switch_context_write_failure_does_not_persist_lane_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            self.write_skill(base / "stable", "shared")
+            self.write_skill(base / "beta", "shared")
+            self.init_repo(base / "stable", "main")
+            self.init_repo(base / "beta", "beta")
+            (base / "destination").mkdir()
+            config = self.write_config(base)
+
+            with patch("aiskillsync.lanes.os.replace", side_effect=OSError("simulated context write failure")):
+                with self.assertRaisesRegex(OSError, "simulated context write failure"):
+                    main(["--config", str(config), "switch", "beta"])
+
+            self.assertFalse((base / "active-stack.json").exists())
+            self.assertFalse((base / "lanes-state.json").exists())
+
+    def test_loads_legacy_lane_state_when_no_runtime_context_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = self.write_config(base)
+            (base / "lanes-state.json").write_text(
+                '{"version": 1, "active": {"policies": "beta"}}\n', encoding="utf-8"
+            )
+            self.assertEqual(load_config(config).lanes[0].name, "policies")
+            from aiskillsync.lanes import load_active_lanes
+            self.assertEqual(load_active_lanes(load_config(config)), {"policies": "beta"})
 
     def test_branch_mismatch_blocks_sync_before_destination_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

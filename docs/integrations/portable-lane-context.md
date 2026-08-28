@@ -6,10 +6,11 @@ Implementation in progress on `feat/portable-lane-context`.
 
 ## Goal
 
-After a successful aiskillsync lane switch, publish a host-local runtime receipt
-that maps each logical lane group to its selected checkout, configured branch,
-and Git revision. This lets optional cross-repository integrations use the
-selected lane without embedding host checkout paths in shared skills or code.
+After a successful aiskillsync lane switch, atomically publish one host-local
+runtime receipt that contains both the selected logical lanes and their resolved
+checkouts, configured branches, and Git revisions. This lets optional
+cross-repository integrations use the selected lane without embedding host
+checkout paths in shared skills or code.
 
 ## Boundaries
 

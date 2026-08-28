@@ -14,7 +14,12 @@ from .config import Config, ConfigError
 
 
 def state_path(config: Config) -> Path:
-    """Return the sidecar state file; config remains the lane-definition source."""
+    """Return the atomic canonical record for lane selection and resolved roots."""
+    return runtime_context_path(config)
+
+
+def legacy_state_path(config: Config) -> Path:
+    """Return the pre-0.1.14 selection-only sidecar for read compatibility."""
     return config.path.parent / "lanes-state.json"
 
 
@@ -38,7 +43,7 @@ def build_runtime_context(config: Config, active: Mapping[str, str] | None = Non
             "branch": bridge.branch,
             "revision": _git_revision(root),
         }
-    return {"version": 1, "lanes": selected, "projects": projects}
+    return {"version": 1, "active": selected, "lanes": selected, "projects": projects}
 
 
 def save_runtime_context(config: Config, active: Mapping[str, str] | None = None) -> None:
@@ -71,12 +76,14 @@ def load_active_lanes(config: Config) -> dict[str, str]:
     active = {group.name: group.default for group in config.lanes}
     path = state_path(config)
     if not path.exists():
+        path = legacy_state_path(config)
+    if not path.exists():
         return active
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError(f"could not read lane state {path}: {exc}") from exc
-    saved = raw.get("active", {})
+    saved = raw.get("lanes", raw.get("active", {}))
     if not isinstance(saved, dict):
         raise ConfigError(f"lane state {path} has invalid active selections")
     for group in config.lanes:
@@ -138,16 +145,7 @@ def resolve_switch(config: Config, terms: tuple[str, ...]) -> tuple[str, str]:
 
 
 def save_active_lane(config: Config, group: str, lane: str) -> None:
+    """Atomically publish the selected lane and its resolved checkout receipt."""
     active = load_active_lanes(config)
     active[group] = lane
-    path = state_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump({"version": 1, "active": active}, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    save_runtime_context(config, active)
