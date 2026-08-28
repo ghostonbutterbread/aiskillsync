@@ -263,16 +263,18 @@ aiskillsync switch beta
 aiskillsync switch policies stable     # named group form
 ```
 
-The selected lane is recorded in `lanes-state.json` next to the config. After a
-successful non-dry-run switch, aiskillsync also atomically writes
-`active-stack.json` beside it. That generated, host-local receipt records every
-active lane group's selected bridge, resolved checkout root, configured branch,
-and current Git revision. It is the runtime integration input for optional
-cross-repository consumers; shared configuration continues to name logical
-bridges rather than another machine's absolute paths. A switch repoints shared
-skill names, and removes only stale symlinks that still point under the
-previously active lane source. It never deletes ordinary folders, local skill
-copies, or symlinks outside that prior lane source.
+After a successful non-dry-run switch, aiskillsync atomically writes one
+`active-stack.json` beside the config. It is both the canonical saved lane
+selection and the generated, host-local runtime receipt. For compatibility,
+existing selection-only `lanes-state.json` files remain readable until the next
+successful switch. The receipt records every active lane group's selected bridge,
+resolved checkout root, configured branch, and current Git revision. It is the
+runtime integration input for optional cross-repository consumers; shared
+configuration continues to name logical bridges rather than another machine's
+absolute paths. A switch repoints shared skill names, and removes only stale
+symlinks that still point under the previously active lane source. It never
+deletes ordinary folders, local skill copies, or symlinks outside that prior lane
+source.
 
 ## Sync Command
 
