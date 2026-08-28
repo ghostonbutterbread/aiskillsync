@@ -40,7 +40,7 @@ from .discovery import (
     discover_bridges,
     enabled_skills,
 )
-from .lanes import effective_config, load_active_lanes, resolve_switch, save_active_lane
+from .lanes import effective_config, load_active_lanes, resolve_switch, save_active_lane, save_runtime_context
 from .sync import (
     SyncAction,
     SyncPlan,
@@ -593,7 +593,9 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             for path in stale:
                 print(f"  {path}", file=stdout)
         save_active_lane(configured, group, lane)
+        save_runtime_context(configured)
         print(f"Active lane saved: {group}={lane}", file=stdout)
+        print(f"Active runtime context saved: {configured.path.parent / 'active-stack.json'}", file=stdout)
     return result
 
 

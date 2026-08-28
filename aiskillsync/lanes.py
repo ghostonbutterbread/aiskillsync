@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -15,6 +16,55 @@ from .config import Config, ConfigError
 def state_path(config: Config) -> Path:
     """Return the sidecar state file; config remains the lane-definition source."""
     return config.path.parent / "lanes-state.json"
+
+
+def runtime_context_path(config: Config) -> Path:
+    """Return the generated, host-local record of the selected source lanes."""
+    return config.path.parent / "active-stack.json"
+
+
+def build_runtime_context(config: Config, active: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Describe every active lane checkout without embedding paths in shared config."""
+    selected = dict(active or load_active_lanes(config))
+    bridges = {bridge.name: bridge for bridge in config.bridges}
+    projects: dict[str, dict[str, str | None]] = {}
+    for group in config.lanes:
+        lane = selected[group.name]
+        bridge = bridges[group.variants[lane]]
+        root = bridge.path.resolve(strict=False)
+        projects[group.name] = {
+            "bridge": bridge.name,
+            "root": str(root),
+            "branch": bridge.branch,
+            "revision": _git_revision(root),
+        }
+    return {"version": 1, "lanes": selected, "projects": projects}
+
+
+def save_runtime_context(config: Config, active: Mapping[str, str] | None = None) -> None:
+    """Atomically publish the selected lane checkouts after a successful switch."""
+    path = runtime_context_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(build_runtime_context(config, active), handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _git_revision(root: Path) -> str | None:
+    """Return a checkout revision when available; non-Git sources remain describable."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def load_active_lanes(config: Config) -> dict[str, str]:

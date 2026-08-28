@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import tempfile
 import unittest
@@ -91,6 +92,25 @@ sync:
             self.assertEqual((base / "destination" / "shared").resolve(), base / "beta" / "skills" / "shared")
             self.assertFalse((base / "destination" / "removed").exists())
             self.assertIn('"beta"', (base / "lanes-state.json").read_text(encoding="utf-8"))
+
+    def test_switch_writes_resolved_runtime_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            self.write_skill(base / "stable", "shared")
+            self.write_skill(base / "beta", "shared")
+            self.init_repo(base / "stable", "main")
+            self.init_repo(base / "beta", "beta")
+            (base / "destination").mkdir()
+            config = self.write_config(base)
+
+            self.assertEqual(main(["--config", str(config), "switch", "beta"]), 0)
+
+            context = json.loads((base / "active-stack.json").read_text(encoding="utf-8"))
+            self.assertEqual(context["version"], 1)
+            self.assertEqual(context["lanes"], {"policies": "beta"})
+            self.assertEqual(context["projects"]["policies"]["root"], str((base / "beta").resolve()))
+            self.assertEqual(context["projects"]["policies"]["branch"], "beta")
+            self.assertTrue(context["projects"]["policies"]["revision"])
 
     def test_branch_mismatch_blocks_sync_before_destination_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
