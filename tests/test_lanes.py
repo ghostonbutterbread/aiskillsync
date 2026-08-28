@@ -125,11 +125,11 @@ sync:
             config = self.write_config(base)
 
             with patch("aiskillsync.lanes.os.replace", side_effect=OSError("simulated context write failure")):
-                with self.assertRaisesRegex(OSError, "simulated context write failure"):
-                    main(["--config", str(config), "switch", "beta"])
+                self.assertEqual(main(["--config", str(config), "switch", "beta"]), 1)
 
             self.assertFalse((base / "active-stack.json").exists())
             self.assertFalse((base / "lanes-state.json").exists())
+            self.assertEqual((base / "destination" / "shared").resolve(), base / "stable" / "skills" / "shared")
 
     def test_loads_legacy_lane_state_when_no_runtime_context_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

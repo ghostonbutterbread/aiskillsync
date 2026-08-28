@@ -586,13 +586,22 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             print(f"  PRUNE {path}", file=stdout)
     result = cmd_sync(sync_args, stdout, stderr)
     if result == 0 and not args.dry_run:
+        try:
+            save_active_lane(configured, group, lane)
+        except OSError as exc:
+            print(f"aiskillsync: could not persist active lane; restoring prior skill links: {exc}", file=stderr)
+            rollback_args = argparse.Namespace(**vars(sync_args))
+            rollback_args.lane_overrides = {}
+            rollback_result = cmd_sync(rollback_args, stdout, stderr)
+            if rollback_result != 0:
+                print("aiskillsync: rollback failed; inspect destination links before retrying", file=stderr)
+            return 1
         for path in stale:
             path.unlink()
         if stale:
             print("Removed stale lane symlinks:", file=stdout)
             for path in stale:
                 print(f"  {path}", file=stdout)
-        save_active_lane(configured, group, lane)
         print(f"Active lane saved: {group}={lane}", file=stdout)
         print(f"Active runtime context saved: {configured.path.parent / 'active-stack.json'}", file=stdout)
     return result
