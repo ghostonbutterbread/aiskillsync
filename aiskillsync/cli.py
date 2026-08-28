@@ -8,6 +8,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -550,6 +551,26 @@ def cmd_repo_remove(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) ->
     return 0
 
 
+def _project_bbh_launcher(configured: Config, bridge: BridgeConfig) -> Path | None:
+    """Atomically point the optional shared bbh command at a selected checkout."""
+    destination = configured.bbh_launcher_path
+    if destination is None:
+        return None
+    source = bridge.path / "scripts" / "bbh"
+    if not source.is_file() or not os.access(source, os.X_OK):
+        raise ConfigError(f"selected BBH launcher is missing or not executable: {source}")
+    if destination.exists() and not destination.is_symlink():
+        raise ConfigError(f"refusing to replace unmanaged bbh launcher: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mktemp(prefix=f".{destination.name}.", dir=destination.parent))
+    try:
+        temporary.symlink_to(source)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return source
+
+
 def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     """Select one configured lane, sync it, then persist selection on success."""
     configured = _load_config(args)
@@ -587,12 +608,18 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     result = cmd_sync(sync_args, stdout, stderr)
     if result == 0 and not args.dry_run:
         try:
+            _project_bbh_launcher(configured, new_bridge)
             save_active_lane(configured, group, lane)
-        except OSError as exc:
+        except (ConfigError, OSError) as exc:
             print(f"aiskillsync: could not persist active lane; restoring prior skill links: {exc}", file=stderr)
             rollback_args = argparse.Namespace(**vars(sync_args))
             rollback_args.lane_overrides = {}
             rollback_result = cmd_sync(rollback_args, stdout, stderr)
+            try:
+                _project_bbh_launcher(configured, old_bridge)
+            except (ConfigError, OSError) as rollback_exc:
+                print(f"aiskillsync: launcher rollback failed: {rollback_exc}", file=stderr)
+                rollback_result = 1
             if rollback_result != 0:
                 print("aiskillsync: rollback failed; inspect destination links before retrying", file=stderr)
             return 1

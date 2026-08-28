@@ -22,6 +22,10 @@ class LaneCliTests(unittest.TestCase):
         )
 
     def init_repo(self, path: Path, branch: str) -> None:
+        launcher = path / "scripts" / "bbh"
+        launcher.parent.mkdir(exist_ok=True)
+        launcher.write_text(f"#!/bin/sh\necho {branch}\n", encoding="utf-8")
+        launcher.chmod(0o755)
         subprocess.run(["git", "init", "-q", "-b", branch, str(path)], check=True)
         subprocess.run(["git", "-C", str(path), "add", "."], check=True)
         subprocess.run(
@@ -49,6 +53,7 @@ lanes:
     variants:
       stable: stable
       beta: beta
+bbh_launcher_path: {base / 'bin' / 'bbh'}
 ai_skill_paths:
   test: {base / 'destination'}
 sync:
@@ -92,6 +97,7 @@ sync:
             self.assertEqual(main(["--config", str(config), "switch", "beta"]), 0)
             self.assertEqual((base / "destination" / "shared").resolve(), base / "beta" / "skills" / "shared")
             self.assertFalse((base / "destination" / "removed").exists())
+            self.assertEqual((base / "bin" / "bbh").resolve(), base / "beta" / "scripts" / "bbh")
             state = json.loads((base / "active-stack.json").read_text(encoding="utf-8"))
             self.assertEqual(state["lanes"], {"policies": "beta"})
 

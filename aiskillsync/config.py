@@ -111,6 +111,7 @@ class Config:
     bridges: tuple[BridgeConfig, ...] = field(default_factory=tuple)
     lanes: tuple[LaneGroupConfig, ...] = field(default_factory=tuple)
     ai_skill_paths: dict[str, Path] = field(default_factory=dict)
+    bbh_launcher_path: Path | None = None
     sync: SyncConfig = field(default_factory=SyncConfig)
     profile_sets: tuple[ProfileSetConfig, ...] = field(default_factory=tuple)
 
@@ -276,6 +277,11 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             raise ConfigError(f"ai_skill_paths.{key} must be a non-empty string")
         destinations[key] = expand_path(value)
 
+    bbh_launcher_raw = raw.get("bbh_launcher_path")
+    if bbh_launcher_raw is not None and (not isinstance(bbh_launcher_raw, str) or not bbh_launcher_raw):
+        raise ConfigError("bbh_launcher_path must be a non-empty string when configured")
+    bbh_launcher_path = expand_path(bbh_launcher_raw) if bbh_launcher_raw else None
+
     profile_sets_raw = raw.get("profile_sets", {})
     if profile_sets_raw is None:
         profile_sets_raw = {}
@@ -420,6 +426,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         bridges=tuple(bridges),
         lanes=tuple(lanes),
         ai_skill_paths=destinations,
+        bbh_launcher_path=bbh_launcher_path,
         sync=SyncConfig(
             mode=mode,
             pull_before_sync=pull_before_sync,
