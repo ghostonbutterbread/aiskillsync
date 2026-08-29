@@ -56,6 +56,7 @@ class BridgeConfig:
     branch: str | None = None
     enabled: bool = True
     skill_layout: str = "flat"
+    kind: str = "managed"
 
     @property
     def skills_dir(self) -> Path:
@@ -89,6 +90,7 @@ class ProfileSourceConfig:
     bridge: str
     include_categories: tuple[str, ...] = ()
     exclude_categories: tuple[str, ...] = ()
+    include_skills: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -220,6 +222,9 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         skill_layout = item.get("skill_layout", "flat")
         if skill_layout not in {"flat", "categorized"}:
             raise ConfigError(f"bridges[{index}].skill_layout must be 'flat' or 'categorized'")
+        kind = item.get("kind", "managed")
+        if kind not in {"managed", "external"}:
+            raise ConfigError(f"bridges[{index}].kind must be managed or external")
         bridges.append(
             BridgeConfig(
                 name=name,
@@ -229,6 +234,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
                 branch=branch,
                 enabled=enabled,
                 skill_layout=skill_layout,
+                kind=kind,
             )
         )
 
@@ -359,7 +365,17 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             excluded_categories = source_raw.get("exclude_categories", [])
             if not isinstance(excluded_categories, list) or not all(isinstance(value, str) and value for value in excluded_categories):
                 raise ConfigError(f"profile_sets.{profile_name}.sources[{index}].exclude_categories must be a list of strings")
-            sources.append(ProfileSourceConfig(bridge_name, tuple(categories), tuple(excluded_categories)))
+            included_skills = source_raw.get("include_skills", [])
+            if not isinstance(included_skills, list) or not all(isinstance(value, str) and value for value in included_skills):
+                raise ConfigError(f"profile_sets.{profile_name}.sources[{index}].include_skills must be a list of skill names")
+            sources.append(
+                ProfileSourceConfig(
+                    bridge_name,
+                    tuple(categories),
+                    tuple(excluded_categories),
+                    tuple(included_skills),
+                )
+            )
         profile_sets.append(ProfileSetConfig(profile_name, profile_destinations, tuple(sources)))
 
     if profile_sets:
@@ -468,6 +484,8 @@ def config_to_text(config: Config) -> str:
                 lines.append(f"    skill_layout: {_format_scalar(bridge.skill_layout)}")
             if bridge.branch is not None:
                 lines.append(f"    branch: {_format_scalar(bridge.branch)}")
+            if bridge.kind != "managed":
+                lines.append(f"    kind: {_format_scalar(bridge.kind)}")
             lines.append(f"    enabled: {str(bridge.enabled).lower()}")
     else:
         lines.append("bridges: []")
@@ -517,6 +535,10 @@ def config_to_text(config: Config) -> str:
                     lines.append("        exclude_categories:")
                     for category in source.exclude_categories:
                         lines.append(f"          - {_format_scalar(category)}")
+                if source.include_skills:
+                    lines.append("        include_skills:")
+                    for skill_name in source.include_skills:
+                        lines.append(f"          - {_format_scalar(skill_name)}")
 
     lines.append("")
     lines.append("sync:")
