@@ -201,6 +201,10 @@ names, still affects the exit status.
 
 ## Repo Management
 
+For an ordinary skill repository, add one bridge and sync it. It remains on its
+configured branch; it does not need a lane unless stable/beta alternatives must
+be selectable.
+
 Add a repo URL to the config. If no local location is given, aiskillsync uses
 `repo_dir/<repo-name>`; by default `repo_dir` is
 `~/.config/aiskillsync/repos`. This updates config only; the repo is cloned on
@@ -251,6 +255,25 @@ lanes:
 ```
 
 Only the active bridge for each lane group participates in normal `sync`.
+
+### BBH shared launcher projection
+
+BBH is the one application integration currently supported alongside skill
+projection. Bind its local-only launcher path to the one lane group that owns
+the separate stable/beta BBH checkouts:
+
+```yaml
+bbh_launcher_path: ~/.local/bin/bbh
+bbh_launcher_lane_group: bbh
+```
+
+Both settings are required together, and the lane-group name must exist. Only a
+successful switch of that named group atomically repoints the symlink to the
+selected checkout's `scripts/bbh`; switching any other lane leaves it unchanged.
+The launcher then resolves BBH scripts and its checkout-local `.venv` itself.
+Do not use these settings for ordinary skill repositories or as a general
+dependency manager.
+
 Repositories outside `lanes` retain the ordinary configured-branch behavior.
 A branch-configured bridge must be checked out on its configured branch before
 sync can pull, discover, or link skills; a mismatch blocks the run.
@@ -263,10 +286,18 @@ aiskillsync switch beta
 aiskillsync switch policies stable     # named group form
 ```
 
-The selected lane is recorded in `lanes-state.json` next to the config. A
-switch repoints shared skill names, and removes only stale symlinks that still
-point under the previously active lane source. It never deletes ordinary
-folders, local skill copies, or symlinks outside that prior lane source.
+After a successful non-dry-run switch, aiskillsync atomically writes one
+`active-stack.json` beside the config. It is both the canonical saved lane
+selection and the generated, host-local runtime receipt. For compatibility,
+existing selection-only `lanes-state.json` files remain readable until the next
+successful switch. The receipt records every active lane group's selected bridge,
+resolved checkout root, configured branch, and current Git revision. It is the
+runtime integration input for optional cross-repository consumers; shared
+configuration continues to name logical bridges rather than another machine's
+absolute paths. A switch repoints shared skill names, and removes only stale
+symlinks that still point under the previously active lane source. It never
+deletes ordinary folders, local skill copies, or symlinks outside that prior lane
+source.
 
 ## Sync Command
 
