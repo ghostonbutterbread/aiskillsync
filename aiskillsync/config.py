@@ -112,6 +112,7 @@ class Config:
     lanes: tuple[LaneGroupConfig, ...] = field(default_factory=tuple)
     ai_skill_paths: dict[str, Path] = field(default_factory=dict)
     bbh_launcher_path: Path | None = None
+    bbh_launcher_lane_group: str | None = None
     sync: SyncConfig = field(default_factory=SyncConfig)
     profile_sets: tuple[ProfileSetConfig, ...] = field(default_factory=tuple)
 
@@ -278,8 +279,18 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         destinations[key] = expand_path(value)
 
     bbh_launcher_raw = raw.get("bbh_launcher_path")
+    bbh_launcher_lane_group = raw.get("bbh_launcher_lane_group")
     if bbh_launcher_raw is not None and (not isinstance(bbh_launcher_raw, str) or not bbh_launcher_raw):
         raise ConfigError("bbh_launcher_path must be a non-empty string when configured")
+    if bbh_launcher_lane_group is not None and (
+        not isinstance(bbh_launcher_lane_group, str) or not bbh_launcher_lane_group
+    ):
+        raise ConfigError("bbh_launcher_lane_group must be a non-empty lane group name when configured")
+    if bool(bbh_launcher_raw) != bool(bbh_launcher_lane_group):
+        raise ConfigError("bbh_launcher_path and bbh_launcher_lane_group must be configured together")
+    lane_groups = {group.name for group in lanes}
+    if bbh_launcher_lane_group is not None and bbh_launcher_lane_group not in lane_groups:
+        raise ConfigError(f"bbh_launcher_lane_group names unknown lane group: {bbh_launcher_lane_group}")
     bbh_launcher_path = expand_path(bbh_launcher_raw) if bbh_launcher_raw else None
 
     profile_sets_raw = raw.get("profile_sets", {})
@@ -427,6 +438,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         lanes=tuple(lanes),
         ai_skill_paths=destinations,
         bbh_launcher_path=bbh_launcher_path,
+        bbh_launcher_lane_group=bbh_launcher_lane_group,
         sync=SyncConfig(
             mode=mode,
             pull_before_sync=pull_before_sync,
@@ -468,6 +480,17 @@ def config_to_text(config: Config) -> str:
             lines.append("    variants:")
             for lane_name, bridge_name in sorted(group.variants.items()):
                 lines.append(f"      {lane_name}: {_format_scalar(bridge_name)}")
+
+    if config.bbh_launcher_path is not None:
+        if config.bbh_launcher_lane_group is None:
+            raise ConfigError("bbh_launcher_path requires bbh_launcher_lane_group")
+        lines.extend(
+            (
+                "",
+                f"bbh_launcher_path: {_format_scalar(config.bbh_launcher_path)}",
+                f"bbh_launcher_lane_group: {_format_scalar(config.bbh_launcher_lane_group)}",
+            )
+        )
 
     lines.append("")
     lines.append("ai_skill_paths:")

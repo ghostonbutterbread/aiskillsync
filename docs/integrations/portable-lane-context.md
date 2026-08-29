@@ -19,8 +19,10 @@ checkout paths in shared skills or code.
 - The receipt is not shared configuration and is not committed by consumers.
 - Applications remain standalone; consuming the receipt is only for a deliberate
   optional integration.
-- This change does not activate a lane, modify the user's aiskillsync config, or
-  change the installed CLI.
+- This change does not activate a lane, automatically modify the user's
+  aiskillsync config, or add a user-facing CLI command.
+- Optional BBH launcher projection is bound to one explicit local lane group;
+  switching any other group must not create, remove, or repoint its launcher.
 
 ## Base and target
 
@@ -32,6 +34,7 @@ checkout paths in shared skills or code.
 ## Evidence
 
 - Focused test: `python3 -m unittest tests.test_lanes.LaneCliTests.test_switch_writes_resolved_runtime_context -v`
+- Isolation regression: `python3 -m unittest tests.test_lanes.LaneCliTests.test_switching_unrelated_lane_does_not_repoint_bbh_launcher -v`
 - Full suite: `python3 -m unittest discover -s tests -v`
 - Isolated BBH stable/beta switch: temporary config verified both the projected
   `ssrf` skill symlink and the selected root/revision in `active-stack.json`.
@@ -48,6 +51,8 @@ selecting BBH source paths for skills or dependencies.
    stable install can overwrite beta (and vice versa). Require distinct
    profile/PATH command roots or another explicit lane-owned launcher mapping;
    reject shared-path clobbering and test both installation orders.
+   Aiskillsync's optional `bbh_launcher_path` must be paired with
+   `bbh_launcher_lane_group`; only that group's switch may repoint it.
 2. **Every BBH entrypoint uses the dispatcher:** replace `run_zdt.sh` ambient
    `python3`/CWD bootstrap with the selected checkout's `scripts/bbh`. Add an
    end-to-end test that proves it imports that checkout's local dependency

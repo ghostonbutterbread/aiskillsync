@@ -608,18 +608,20 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     result = cmd_sync(sync_args, stdout, stderr)
     if result == 0 and not args.dry_run:
         try:
-            _project_bbh_launcher(configured, new_bridge)
+            if group == configured.bbh_launcher_lane_group:
+                _project_bbh_launcher(configured, new_bridge)
             save_active_lane(configured, group, lane)
         except (ConfigError, OSError) as exc:
             print(f"aiskillsync: could not persist active lane; restoring prior skill links: {exc}", file=stderr)
             rollback_args = argparse.Namespace(**vars(sync_args))
             rollback_args.lane_overrides = {}
             rollback_result = cmd_sync(rollback_args, stdout, stderr)
-            try:
-                _project_bbh_launcher(configured, old_bridge)
-            except (ConfigError, OSError) as rollback_exc:
-                print(f"aiskillsync: launcher rollback failed: {rollback_exc}", file=stderr)
-                rollback_result = 1
+            if group == configured.bbh_launcher_lane_group:
+                try:
+                    _project_bbh_launcher(configured, old_bridge)
+                except (ConfigError, OSError) as rollback_exc:
+                    print(f"aiskillsync: launcher rollback failed: {rollback_exc}", file=stderr)
+                    rollback_result = 1
             if rollback_result != 0:
                 print("aiskillsync: rollback failed; inspect destination links before retrying", file=stderr)
             return 1

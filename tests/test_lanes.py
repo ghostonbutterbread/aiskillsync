@@ -9,7 +9,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from aiskillsync.cli import main
-from aiskillsync.config import ConfigError, load_config
+from aiskillsync.config import ConfigError, config_from_mapping, config_to_text, load_config, parse_simple_yaml
 
 
 class LaneCliTests(unittest.TestCase):
@@ -54,6 +54,7 @@ lanes:
       stable: stable
       beta: beta
 bbh_launcher_path: {base / 'bin' / 'bbh'}
+bbh_launcher_lane_group: policies
 ai_skill_paths:
   test: {base / 'destination'}
 sync:
@@ -119,6 +120,80 @@ sync:
             self.assertEqual(context["projects"]["policies"]["root"], str((base / "beta").resolve()))
             self.assertEqual(context["projects"]["policies"]["branch"], "beta")
             self.assertTrue(context["projects"]["policies"]["revision"])
+
+    def test_switching_unrelated_lane_does_not_repoint_bbh_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            for name, branch, skill in (
+                ("bbh-stable", "main", "bbh"),
+                ("bbh-beta", "beta", "bbh"),
+                ("policies-stable", "main", "policies"),
+                ("policies-beta", "beta", "policies"),
+            ):
+                self.write_skill(base / name, skill)
+                self.init_repo(base / name, branch)
+            (base / "destination").mkdir()
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: bbh-stable
+    path: {base / 'bbh-stable'}
+    skills_path: skills
+    branch: main
+  - name: bbh-beta
+    path: {base / 'bbh-beta'}
+    skills_path: skills
+    branch: beta
+  - name: policies-stable
+    path: {base / 'policies-stable'}
+    skills_path: skills
+    branch: main
+  - name: policies-beta
+    path: {base / 'policies-beta'}
+    skills_path: skills
+    branch: beta
+lanes:
+  bbh:
+    default: stable
+    variants:
+      stable: bbh-stable
+      beta: bbh-beta
+  policies:
+    default: stable
+    variants:
+      stable: policies-stable
+      beta: policies-beta
+bbh_launcher_path: {base / 'bin' / 'bbh'}
+bbh_launcher_lane_group: bbh
+ai_skill_paths:
+  test: {base / 'destination'}
+sync:
+  mode: symlink
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations:
+    - test
+""",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(main(["--config", str(config), "switch", "policies", "beta"]), 0)
+
+            self.assertFalse((base / "bin" / "bbh").exists())
+            context = json.loads((base / "active-stack.json").read_text(encoding="utf-8"))
+            self.assertEqual(context["lanes"], {"bbh": "stable", "policies": "beta"})
+
+    def test_serialized_config_preserves_bbh_launcher_lane_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config_path = self.write_config(base)
+
+            restored = config_from_mapping(
+                parse_simple_yaml(config_to_text(load_config(config_path))), base / "restored.yaml"
+            )
+
+            self.assertEqual(restored.bbh_launcher_path, base / "bin" / "bbh")
+            self.assertEqual(restored.bbh_launcher_lane_group, "policies")
 
     def test_switch_context_write_failure_does_not_persist_lane_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

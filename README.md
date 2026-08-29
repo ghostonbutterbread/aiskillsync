@@ -259,17 +259,20 @@ Only the active bridge for each lane group participates in normal `sync`.
 ### BBH shared launcher projection
 
 BBH is the one application integration currently supported alongside skill
-projection. Add a local-only `bbh_launcher_path` when its lane group selects
-separate stable/beta BBH checkouts:
+projection. Bind its local-only launcher path to the one lane group that owns
+the separate stable/beta BBH checkouts:
 
 ```yaml
 bbh_launcher_path: ~/.local/bin/bbh
+bbh_launcher_lane_group: bbh
 ```
 
-On a successful BBH lane switch, aiskillsync atomically repoints that symlink to
-the selected checkout's `scripts/bbh`. The launcher then resolves BBH scripts
-and its checkout-local `.venv` itself. Do not use this field for ordinary skill
-repositories or as a general dependency manager.
+Both settings are required together, and the lane-group name must exist. Only a
+successful switch of that named group atomically repoints the symlink to the
+selected checkout's `scripts/bbh`; switching any other lane leaves it unchanged.
+The launcher then resolves BBH scripts and its checkout-local `.venv` itself.
+Do not use these settings for ordinary skill repositories or as a general
+dependency manager.
 
 Repositories outside `lanes` retain the ordinary configured-branch behavior.
 A branch-configured bridge must be checked out on its configured branch before
