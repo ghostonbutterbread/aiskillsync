@@ -76,6 +76,78 @@ selecting BBH source paths for skills or dependencies.
    Policies, Hunter Memory, or other repositories from conventional home paths.
    Make each an explicit optional plugin/configuration or a declared dependency.
 
+## Final migration plan
+
+### Command contract
+
+Use one generic dispatcher contract for BBH-owned executable code:
+
+```bash
+bbh agents/<tool>.py <arguments>
+bbh scripts/<tool>.py <arguments>
+bbh skills/<skill>/scripts/<tool>.py <arguments>
+```
+
+The repository-relative target identifies the tool; it is not a checkout path.
+`bbh` resolves that target beneath the selected checkout and runs Python through
+that checkout's local environment. Do not add a named-tool registry in this
+migration: it would create a second mapping to maintain. A small alias layer may
+be proposed later only for proven high-frequency stable commands.
+
+### Phases
+
+1. **Finish the runtime boundary.** Keep `scripts/bbh` as the sole public
+   BBH executable dispatcher. Route `run_zdt.sh` through it. Keep internal
+   Python imports/subprocesses self-relative when they are not user/operator
+   launch boundaries.
+2. **Make lane activation explicit.** Aiskillsync selects skill projections;
+   the selected agent profile must expose exactly one lane-owned `bbh` on PATH.
+   Use separate stable/beta command roots or profiles and reject installation
+   that would overwrite an existing launcher from another lane.
+3. **Migrate canonical agent-visible commands.** In canonical `skills/`,
+   `prompts/`, README/docs, nested runnable references, and generated handoff
+   text, replace direct BBH `python`, CWD, root-variable, and absolute-checkout
+   invocations with the generic `bbh` contract. Preserve external data paths as
+   command arguments.
+4. **Regenerate skill projections/mirrors.** Treat canonical skill source as
+   authoritative. Rebuild or remove stale tracked provider mirrors rather than
+   maintaining separate command text in `.agents/` or `.claude/`. Then run an
+   aiskillsync dry-run and fresh-agent read-only resolution check.
+5. **Remove implicit external code discovery.** BBH must not choose optional
+   code from conventional sibling/home paths. Declare a checkout-local
+   dependency, explicit plugin, or narrowly owned configuration instead.
+6. **Close remote and generated-command gaps.** Remote BBH work must preflight
+   the selected remote launcher/root/revision; generated next-command/help text
+   must emit `bbh <repository-relative-target>`, not direct Python.
+7. **Enforce and verify.** Add static checks for every agent-visible runnable
+   document, including multiline CWD/PYTHONPATH patterns and mirrors. Verify all
+   documented targets with `bbh --print-command`; test beta/stable launcher
+   isolation, the local virtualenv path, and a fresh synchronized skill
+   projection.
+
+### Explicit non-goals
+
+- Do not hard-code a selected BBH checkout in skills or Aiskillsync receipts.
+- Do not use Aiskillsync as a general dependency/source-path resolver.
+- Do not convert external artifact roots (`/mnt/bounty`, Shared, temporary
+  files, source inputs) into BBH paths; retain them as resolver/configuration
+  values.
+- Do not require a Bounty Core commit pin for this migration.
+
+### Activation evidence and remaining boundary
+
+A disposable `portable-smoke` profile was projected to temporary Hermes and
+Codex destinations from the candidate BBH worktree. Aiskillsync created 89
+symlinks in each destination, each resolving into that candidate's `skills/`
+tree; a repeat dry-run reported only correct-source no-ops. A Codex read-only
+smoke then read the projected XSS and Chromium Test skills and correctly
+explained the `bbh <repository-relative-target>` contract.
+
+This proves the synchronizer/projection path. It does not activate the candidate
+for ordinary agents: the active `security` profile remains deliberately bound
+to the configured BBH beta checkout until this branch is reviewed, merged into
+that lane, and the profile is re-synced.
+
 ### Accepted Bounty Core dependency policy
 
 BBH installs Bounty Core into its checkout-local virtual environment from the
