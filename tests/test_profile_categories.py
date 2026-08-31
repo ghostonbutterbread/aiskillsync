@@ -638,6 +638,51 @@ profile_sets:
         self.assertTrue(removed)
         self.assertTrue(external_retained)
 
+    def test_focused_profile_skill_sync_does_not_prune_other_managed_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            bridge = base / "source"
+            for name in ("alpha", "beta"):
+                skill = bridge / "skills" / name
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(name, encoding="utf-8")
+            destination = base / "profile"
+            config = base / "config.yaml"
+            config.write_text(
+                f"""bridges:
+  - name: source
+    path: {bridge}
+ai_skill_paths:
+  profile: {destination}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+profile_sets:
+  focused:
+    destination: profile
+    sources:
+      - bridge: source
+""",
+                encoding="utf-8",
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                initial_result = main(["--config", str(config), "sync", "--profile", "focused"])
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                focused_result = main(
+                    ["--config", str(config), "sync", "--profile", "focused", "--skill", "alpha"]
+                )
+
+            alpha_retained = (destination / "alpha").is_symlink()
+            beta_retained = (destination / "beta").is_symlink()
+
+        self.assertEqual(initial_result, 0)
+        self.assertEqual(focused_result, 0, stderr.getvalue())
+        self.assertTrue(alpha_retained)
+        self.assertTrue(beta_retained)
+        self.assertNotIn("PRUNE", stdout.getvalue())
+
     def test_sync_all_prunes_removed_profile_source_without_touching_another_group(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

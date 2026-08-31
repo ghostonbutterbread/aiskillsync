@@ -1080,7 +1080,11 @@ def _build_sync_requests_plan(
         )
         for index, request in enumerate(requests)
     )
-    plans = tuple(add_profile_manifest_prunes(plan, request.config.path) for plan, request in zip(plans, requests))
+    if not args.skill and not denylist:
+        plans = tuple(
+            add_profile_manifest_prunes(plan, request.config.path)
+            for plan, request in zip(plans, requests)
+        )
     return SyncPlan(
         dry_run=dry_run,
         adopt=adopt,
