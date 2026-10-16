@@ -710,6 +710,9 @@ def _parse_mapping(
         if value_text == "":
             if index < len(lines) and lines[index][0] > indent:
                 value, index = _parse_block(lines, index, lines[index][0])
+            elif index < len(lines) and lines[index][0] == indent and lines[index][1].startswith("- "):
+                # YAML permits a sequence's dash at its parent mapping key's indent.
+                value, index = _parse_list(lines, index, indent)
             else:
                 value = {}
         else:
