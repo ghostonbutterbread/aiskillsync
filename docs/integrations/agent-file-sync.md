@@ -1,16 +1,15 @@
 # Agent-file synchronization integration dossier
 
-- **Status:** implemented; awaiting parent independent review (not released)
+- **Status:** independently accepted for beta; deployment pending
 - **Owner:** delegated implementation for parent task `t_cf47e3cc`
 - **Branch / owning ref:** `feat/agent-file-sync`
 - **Worktree:** `/home/ryushe/worktrees/aiskillsync-agent-sync`
 - **Base / immutable starting checkpoint:** `ef807e19b52ba9b9bbfe4cd64ab5b0bd238afd22`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-10-26
-- **Implementation checkpoint:** the scoped implementation commit containing this
-  dossier on `feat/agent-file-sync`; resolve with `git rev-parse feat/agent-file-sync`.
-  The exact resulting SHA is also returned in the parent handoff. No merge/push
-  authority is delegated here.
+- **Implementation checkpoint:** `ff422dc0456abd00ec929105de53ce9aa7aed368`
+  on `feat/agent-file-sync`. The subsequent handoff-only commit records review
+  acceptance and its required patch-version increment; implementation is unchanged.
 - **Inspiration / canonical reference:** explicit Ryu request to synchronize BBH's
   physical `agents/` definitions into configured runtimes, primarily Claude's
   `~/.claude/agents`, without representing agent files as skills.
@@ -90,7 +89,14 @@ No provider translation or assumed universal Markdown support is introduced.
   projection manifest was created. Scratch receipt script:
   `/home/ryushe/.hermes/cache/scratch/verify_aiskillsync_agent_wheel.py`.
 - Last upstream fetch: `origin/beta` remained at the supplied base checkpoint.
-- Independent review: **pending parent**, not claimed by the implementer.
+- Independent release review accepted exact implementation checkpoint
+  `ff422dc0456abd00ec929105de53ce9aa7aed368` without blockers. Reviewer reran
+  135 tests twice (including scratch HOME), built/installed an exact-source
+  wheel and exercised 13 real console invocations with all four BBH definitions.
+  Verified profile/lane/branch gates, dry-run equality, adoption backup types,
+  duplicate/missing-name blocking, focused filtering, no-op and skill isolation.
+  Parent separately reran all 135 tests successfully. Source is accepted;
+  actual Claude consumer evidence on local and Hoster remains pending.
 
 ## Residuals and deferred activation
 
