@@ -115,6 +115,7 @@ def materialize_repositories_for_sync(
     force_repo_refresh: bool = False,
     skip_clone_bridges: frozenset[str] = frozenset(),
     skip_pull_bridges: frozenset[str] = frozenset(),
+    report_skill_changes: bool = True,
 ) -> RepositoryMaterialization:
     """Clone or update selected enabled repos for sync only."""
 
@@ -140,6 +141,7 @@ def materialize_repositories_for_sync(
                 force_repo_refresh=force_repo_refresh,
                 skip_clone=bridge.name in skip_clone_bridges,
                 skip_pull=bridge.name in skip_pull_bridges,
+                report_skill_changes=report_skill_changes,
             )
             for bridge in group
         )
@@ -171,6 +173,7 @@ def _materialize_bridge(
     force_repo_refresh: bool,
     skip_clone: bool,
     skip_pull: bool,
+    report_skill_changes: bool,
 ) -> RepositoryMaterialization:
     if not bridge.enabled:
         return RepositoryMaterialization()
@@ -218,9 +221,10 @@ def _materialize_bridge(
             notices=(notice, f"UNCHANGED repo {bridge.name}: already up to date")
         )
     notices = [notice]
-    if before is not None and after is not None:
+    if report_skill_changes and before is not None and after is not None:
         notices.extend(_skill_change_notices(bridge, git_changed_skill_names(bridge, before, after)))
-    notices.append(f"UPDATED repo {bridge.name}: pulled new source changes; linked skills now use the updated files")
+    subject = "linked skills" if report_skill_changes else "linked agent files"
+    notices.append(f"UPDATED repo {bridge.name}: pulled new source changes; {subject} now use the updated files")
     return RepositoryMaterialization(notices=tuple(notices))
 
 

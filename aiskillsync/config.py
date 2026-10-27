@@ -57,6 +57,14 @@ class BridgeConfig:
     enabled: bool = True
     skill_layout: str = "flat"
     kind: str = "managed"
+    agents_path: str | None = None
+
+    @property
+    def agents_dir(self) -> Path | None:
+        if self.agents_path is None:
+            return None
+        path = expand_path(self.agents_path)
+        return path if path.is_absolute() else self.path / path
 
     @property
     def skills_dir(self) -> Path:
@@ -117,6 +125,7 @@ class Config:
     bbh_launcher_lane_group: str | None = None
     sync: SyncConfig = field(default_factory=SyncConfig)
     profile_sets: tuple[ProfileSetConfig, ...] = field(default_factory=tuple)
+    ai_agent_paths: dict[str, Path] = field(default_factory=dict)
 
 
 def expand_path(value: str | Path) -> Path:
@@ -216,6 +225,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             raise ConfigError(f"bridges[{index}].skills_path must be a non-empty string")
         repo = optional_string(item, "repo", f"bridges[{index}]")
         branch = optional_string(item, "branch", f"bridges[{index}]")
+        agents_path = optional_string(item, "agents_path", f"bridges[{index}]")
         enabled = item.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ConfigError(f"bridges[{index}].enabled must be true or false")
@@ -235,6 +245,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
                 enabled=enabled,
                 skill_layout=skill_layout,
                 kind=kind,
+                agents_path=agents_path,
             )
         )
 
@@ -284,6 +295,27 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             raise ConfigError(f"ai_skill_paths.{key} must be a non-empty string")
         destinations[key] = expand_path(value)
 
+    agent_paths_raw = raw.get("ai_agent_paths", {})
+    if not isinstance(agent_paths_raw, dict):
+        raise ConfigError("ai_agent_paths must be a mapping")
+    agent_paths: dict[str, Path] = {}
+    for key, value in agent_paths_raw.items():
+        if (
+            not isinstance(key, str) or not key or key in {".", ".."}
+            or "/" in key or "\\" in key
+        ):
+            raise ConfigError("agent destination names must be single path components")
+        if not isinstance(value, str) or not value:
+            raise ConfigError(f"ai_agent_paths.{key} must be a non-empty string")
+        agent_paths[key] = expand_path(value)
+    agent_roots: dict[Path, str] = {}
+    skill_roots = {canonical_path(root) for root in destinations.values()}
+    for name, root in agent_paths.items():
+        canonical = canonical_path(root)
+        if canonical in skill_roots or canonical in agent_roots:
+            raise ConfigError(f"agent destinations share a root with another agent or skill destination: {name} ({root})")
+        agent_roots[canonical] = name
+
     bbh_launcher_raw = raw.get("bbh_launcher_path")
     bbh_launcher_lane_group = raw.get("bbh_launcher_lane_group")
     if bbh_launcher_raw is not None and (not isinstance(bbh_launcher_raw, str) or not bbh_launcher_raw):
@@ -331,7 +363,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
                 f"profile_sets.{profile_name}.destinations contains duplicate destination names: "
                 + ", ".join(duplicate_destinations)
             )
-        unknown_destinations = sorted(set(profile_destinations) - set(destinations))
+        unknown_destinations = sorted(set(profile_destinations) - (set(destinations) | set(agent_paths)))
         if unknown_destinations:
             raise ConfigError(
                 f"profile_sets.{profile_name}.destinations names unknown destination: "
@@ -395,6 +427,8 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         canonical_owners: dict[Path, str] = {}
         shared_roots: list[str] = []
         for destination, owner in destination_owners.items():
+            if destination not in destinations:
+                continue
             root = canonical_path(destinations[destination])
             if root in canonical_owners:
                 shared_roots.append(f"{canonical_owners[root]}, {destination} ({root})")
@@ -410,6 +444,12 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             raise ConfigError(
                 "profile_sets are active; every ai_skill_paths destination must be assigned: "
                 + ", ".join(unassigned_destinations)
+            )
+        unassigned_agents = sorted(set(agent_paths) - assigned_destinations)
+        if unassigned_agents:
+            raise ConfigError(
+                "profile_sets are active; every ai_agent_paths destination must be assigned: "
+                + ", ".join(unassigned_agents)
             )
 
     sync_raw = raw.get("sync", {})
@@ -453,6 +493,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         bridges=tuple(bridges),
         lanes=tuple(lanes),
         ai_skill_paths=destinations,
+        ai_agent_paths=agent_paths,
         bbh_launcher_path=bbh_launcher_path,
         bbh_launcher_lane_group=bbh_launcher_lane_group,
         sync=SyncConfig(
@@ -480,6 +521,8 @@ def config_to_text(config: Config) -> str:
                 lines.append(f"    repo: {_format_scalar(bridge.repo)}")
             lines.append(f"    path: {_format_scalar(bridge.path)}")
             lines.append(f"    skills_path: {_format_scalar(bridge.skills_path)}")
+            if bridge.agents_path is not None:
+                lines.append(f"    agents_path: {_format_scalar(bridge.agents_path)}")
             if bridge.skill_layout != "flat":
                 lines.append(f"    skill_layout: {_format_scalar(bridge.skill_layout)}")
             if bridge.branch is not None:
@@ -514,6 +557,11 @@ def config_to_text(config: Config) -> str:
     lines.append("ai_skill_paths:")
     for key, value in sorted(config.ai_skill_paths.items()):
         lines.append(f"  {key}: {_format_scalar(value)}")
+
+    if config.ai_agent_paths:
+        lines.extend(("", "ai_agent_paths:"))
+        for key, value in sorted(config.ai_agent_paths.items()):
+            lines.append(f"  {key}: {_format_scalar(value)}")
 
     if config.profile_sets:
         lines.extend(("", "profile_sets:"))

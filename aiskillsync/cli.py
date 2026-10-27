@@ -9,12 +9,13 @@ import os
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
 from urllib.parse import urlparse
 
 from . import __version__
+from .agents import apply_agent_sync_plan, build_agent_sync_plan, resolve_agent_sync_request
 from .config import (
     BridgeConfig,
     Config,
@@ -257,6 +258,15 @@ def build_parser() -> argparse.ArgumentParser:
     root_parser.add_argument("--dry-run", action="store_true", help="preview changes without writing")
     root_parser.set_defaults(func=cmd_root_context)
 
+    agents_parser = subparsers.add_parser("agents", help="sync explicitly configured agent .md files (not skills)")
+    agents_parser.add_argument("--repo", action="append", default=[], help="configured source bridge; repeat to select several")
+    agents_parser.add_argument("--dest", action="append", default=[], help="explicit ai_agent_paths destination; repeat to select several")
+    agents_parser.add_argument("--dry-run", action="store_true", help="preview without any filesystem changes")
+    agents_parser.add_argument("--profile", help="profile_sets entry whose sources and agent destinations may be synced")
+    agents_parser.add_argument("--agent", action="append", default=[], help="only sync this frontmatter name; repeat to select several")
+    agents_parser.add_argument("--adopt", action="store_true", help="back up same-name destination conflicts before replacing them")
+    agents_parser.set_defaults(func=cmd_agents)
+
     repo_parser = subparsers.add_parser("repo", help="manage configured repos")
     repo_subparsers = repo_parser.add_subparsers(dest="repo_command", required=True)
 
@@ -413,6 +423,8 @@ def cmd_config(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             print(f"     path: {bridge.path}", file=stdout)
             print(f"     skills_path: {bridge.skills_path}", file=stdout)
             print(f"     skills_dir: {bridge.skills_dir}", file=stdout)
+            if bridge.agents_path is not None:
+                print(f"     agents_path: {bridge.agents_path}", file=stdout)
             print(f"     branch: {bridge.branch or '-'}", file=stdout)
     else:
         print("  none", file=stdout)
@@ -425,6 +437,10 @@ def cmd_config(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     else:
         print("  none", file=stdout)
 
+    print("", file=stdout)
+    print("AI agent paths:", file=stdout)
+    for key, path in sorted(config.ai_agent_paths.items()):
+        print(f"  {key}: {path}", file=stdout)
     print("", file=stdout)
     print("Sync:", file=stdout)
     print(f"  mode: {config.sync.mode}", file=stdout)
@@ -846,6 +862,51 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     return 0
 
 
+def cmd_agents(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    # Unlike historical commands, even a missing default config must not make a
+    # preview write a template. Configure agent paths explicitly before use.
+    config = load_config(args.config or default_config_path())
+    selectors = tuple(args.repo)
+    effective, bridges, _ = resolve_agent_sync_request(config, selectors, tuple(args.dest), args.profile)
+    source_selectors = tuple(bridge.name for bridge in bridges)
+    preflight = _sync_repo_preflight(effective, source_selectors, dry_run=args.dry_run, stdin=sys.stdin, stdout=stdout)
+    materialization = materialize_repositories_for_sync(
+        effective, source_selectors, dry_run=args.dry_run,
+        skip_clone_bridges=frozenset(preflight.skip_clone_bridges),
+        skip_pull_bridges=frozenset(preflight.skip_pull_bridges),
+        report_skill_changes=False,
+    )
+    plan = build_agent_sync_plan(
+        config, selectors, tuple(args.dest), dry_run=args.dry_run, profile_name=args.profile,
+        adopt=args.adopt, backup_root=make_backup_root() if args.adopt else None,
+        include_agents=tuple(args.agent),
+    )
+    plan = replace(plan, notices=(*preflight.notices, *materialization.notices, *plan.notices),
+                   errors=(*preflight.errors, *materialization.errors, *plan.errors))
+    for notice in plan.notices:
+        print(notice, file=stdout)
+    for error in plan.errors:
+        print(f"ERROR {error}", file=stdout)
+    for action in plan.actions:
+        print(f"{action.action.upper()} agent {action.destination}:{action.agent.name} {action.path} -> {action.agent.path}", file=stdout)
+    if plan.has_blockers:
+        print("Agent sync blocked by errors or conflicts", file=stderr)
+        return 1
+    if args.dry_run:
+        print("Dry run only; no filesystem changes were made", file=stdout)
+        return 0
+    try:
+        created = apply_agent_sync_plan(plan)
+    except (OSError, ValueError) as exc:
+        print(f"aiskillsync: agent sync failed: {exc}", file=stderr)
+        return 1
+    print(f"Created {len(created)} agent symlink(s)" if created else "No agent symlinks needed", file=stdout)
+    if created and any(action.action == "adopt" for action in plan.actions):
+        assert plan.backup_root is not None
+        print(f"Backups written to: {plan.backup_root / 'agents'}", file=stdout)
+    return 0
+
+
 def cmd_root_context(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     config = _load_config(args)
     destinations, destination_errors = _resolve_root_context_destinations(
@@ -995,8 +1056,8 @@ def _resolve_sync_requests(config: Config, args: argparse.Namespace) -> tuple[Sy
             return tuple(
                 _profile_sync_request(config, profile)
                 for profile in config.profile_sets
-                if profile.destinations
-            )
+                if any(destination in config.ai_skill_paths for destination in profile.destinations)
+            ) or (SyncRequest(config, (), (), errors=("no skill destinations configured in profile_sets",)),)
         return (
             SyncRequest(
                 config=config,
@@ -1009,7 +1070,8 @@ def _resolve_sync_requests(config: Config, args: argparse.Namespace) -> tuple[Sy
 
 
 def _profile_sync_request(config: Config, profile: ProfileSetConfig) -> SyncRequest:
-    if not profile.destinations:
+    destinations = tuple(name for name in profile.destinations if name in config.ai_skill_paths)
+    if not destinations:
         return SyncRequest(
             config=config,
             repo_selectors=(),
@@ -1028,8 +1090,8 @@ def _profile_sync_request(config: Config, profile: ProfileSetConfig) -> SyncRequ
     return SyncRequest(
         config=config,
         repo_selectors=tuple(selectors),
-        destinations=profile.destinations,
-        notices=(f"PROFILE {profile.name}: destinations {', '.join(profile.destinations)}",),
+        destinations=destinations,
+        notices=(f"PROFILE {profile.name}: destinations {', '.join(destinations)}",),
         category_filters=categories,
         exclude_category_filters=excluded_categories,
         include_skill_filters=included_skills,
