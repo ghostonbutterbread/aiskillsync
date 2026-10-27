@@ -272,6 +272,107 @@ matches the intended plugin/marketplace entry and enumerate the discovered
 skill names before activation. This permits one upstream source to supply
 multiple skills without recursively importing unrelated `SKILL.md` files.
 
+## Agent-file synchronization
+
+Agent definitions are opt-in **files**, separate from skill directories. Use
+`agents` to project Claude-compatible definitions from BBH's canonical `agents/`
+directory without running skill sync or changing its projection manifest:
+
+```yaml
+bridges:
+  - name: bounty-harness
+    path: ~/projects/bug_bounty_harness
+    skills_path: skills
+    agents_path: agents
+
+ai_skill_paths:
+  claude: ~/.claude/skills
+ai_agent_paths:
+  claude: ~/.claude/agents
+
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+```
+
+```bash
+aiskillsync agents --repo bounty-harness --dest claude --dry-run
+aiskillsync agents --repo bounty-harness --dest claude
+aiskillsync agents --repo bounty-harness --dest claude --agent reviewer --adopt --dry-run
+```
+
+Only immediate `*.md` children with opening/closing `---` frontmatter, a valid
+top-level `name`, and a non-empty top-level `description` are discovered. Names
+start with a lowercase letter or digit and contain only lowercase letters,
+digits, and hyphens. Required fields accept the config parser's scalar subset;
+descriptions also accept indented `|`/`>` blocks. Other provider fields and the
+body are not transformed or schema-validated. Invalid files and Markdown without
+agent frontmatter (such as `index.md`) are reported as skipped; code files and
+nested directories are not scanned. Missing configured source directories,
+no valid definitions, missing `--agent` selections, and duplicate selected agent
+names block apply. Destination filenames use the frontmatter name:
+`<ai_agent_paths.claude>/<name>.md` links to the original source file, even when
+its source filename differs.
+
+There are **no inferred agent roots** and no built-in Codex/Hermes conversion.
+Claude's `~/.claude/agents` is the primary supported format/consumer. Other roots
+can be explicitly configured only when their consumer accepts the source format;
+configuring a path does not establish compatibility. Agent roots cannot alias
+another agent or skill destination root.
+
+If `profile_sets` is active, `agents` requires a named profile instead of
+`--repo`/`--dest`, so it cannot bypass existing source/destination ownership:
+
+```yaml
+profile_sets:
+  security:
+    destinations: [claude]
+    sources:
+      - bridge: bounty-harness
+```
+
+```bash
+aiskillsync agents --profile security --dry-run
+aiskillsync agents --profile security --agent reviewer --adopt
+```
+
+A profile uses its listed bridges that explicitly configure `agents_path`, and
+only its destinations present in `ai_agent_paths`. Skill category/name filters
+apply only to skills; use repeatable `--agent <frontmatter-name>` for a focused
+agent run. A destination can exist in either or both path mappings; with profiles
+active, every configured destination name in either mapping must be assigned to
+exactly one profile. Skill sync ignores agent-only destinations, and `agents`
+never links skills. Without profiles, `--dest` is required (repeatable); `--repo`
+accepts existing configured bridge selectors and defaults to all configured
+bridges with `agents_path`. Ad-hoc source URLs are not added by this command.
+
+The active lane and configured branch checks are shared with skill sync. Clone
+and fast-forward pull use the existing `sync.clone_if_missing` and
+`sync.pull_before_sync` settings, only for selected agent-enabled sources.
+Git refreshes the whole selected checkout, so existing skill links into that
+checkout can see updated source content too; set `pull_before_sync: false` for
+an isolated rollout of already-reviewed local agent files.
+`--dry-run` never clones, pulls, creates a default config, writes backups, or
+changes links. A missing cloneable source reports deferred discovery; preview
+again after cloning to inspect its definitions. Branch checks may run read-only
+Git commands. Apply requires an existing explicit config or existing default
+config; agent support is not enabled by the default template.
+
+Correct links are no-ops. Same-name files, directories, and unexpected/dangling
+symlinks block the entire destination apply unless `--adopt` is explicitly used.
+Adoption moves the entry (not a symlink's target) to
+`~/.cache/aiskillsync-migration/<timestamp>/agents/<destination>/<name>.md` before
+linking; existing backup paths are never overwritten. Apply rechecks destination
+state and source branches before writing. If linking an adopted entry fails, it
+attempts to restore that entry. A multi-file filesystem failure can still leave
+earlier successful links in place; inspect the reported error and backups.
+
+Agent sync never prunes anything: filtered-out entries, unmanaged files, and
+obsolete links are preserved. Lane `switch` remains a skill/launcher operation;
+run `agents --profile <name> --dry-run` after a switch, then explicitly adopt any
+old-lane links you want to repoint. Removing/renaming old agents is a separate
+manual cleanup decision, not an implicit consequence of a filtered rollout.
+
 ## Policy Lanes: stable and beta
 
 A **bridge** is one checked-out skill source. For a repository that needs a
