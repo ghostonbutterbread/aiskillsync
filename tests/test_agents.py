@@ -212,6 +212,53 @@ class AgentSyncTests(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
         self.assertIn("SKIP agent", again.stdout)
 
+    def test_sync_all_supports_agent_only_profile(self):
+        source = self.agent()
+        self.raw.pop("ai_skill_paths")
+        self.raw["profile_sets"] = {"work": {"destination": "claude", "sources": [{"bridge": "bbh"}]}}
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue((self.destination / "reviewer.md").is_symlink())
+        self.assertEqual((self.destination / "reviewer.md").resolve(), source)
+
+    def test_sync_all_legacy_configuration_includes_agents(self):
+        source = self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue((self.base / "claude" / "skills" / "safe").is_symlink())
+        self.assertEqual((self.destination / "reviewer.md").resolve(), source)
+
+    def test_sync_all_keeps_profile_agent_sources_isolated(self):
+        source = self.agent()
+        other = self.base / "other"
+        (other / "agents").mkdir(parents=True)
+        other_agent = other / "agents" / "other.md"
+        other_agent.write_text("---\nname: other\ndescription: Other role\n---\nOther.\n")
+        for root in (self.source, other):
+            skill = root / "skills" / "safe"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("safe")
+        self.raw["bridges"].append({"name": "other", "path": str(other), "agents_path": "agents"})
+        self.raw["ai_skill_paths"]["other"] = str(self.base / "other-skills")
+        self.raw["ai_agent_paths"]["other"] = str(self.base / "other-agents")
+        self.raw["profile_sets"] = {
+            "work": {"destination": "claude", "sources": [{"bridge": "bbh"}]},
+            "personal": {"destination": "other", "sources": [{"bridge": "other"}]},
+        }
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((self.destination / "reviewer.md").resolve(), source)
+        self.assertEqual((self.base / "other-agents" / "other.md").resolve(), other_agent)
+        self.assertFalse((self.destination / "other.md").exists())
+        self.assertFalse((self.base / "other-agents" / "reviewer.md").exists())
+
     def test_sync_all_agent_conflict_blocks_skill_and_agent_writes(self):
         self.agent()
         skill = self.source / "skills" / "safe"

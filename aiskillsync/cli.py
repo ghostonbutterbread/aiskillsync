@@ -777,6 +777,30 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     adopt = args.adopt or args.overwrite_local_copies
     denylist, denylist_errors = _sync_denylist(config, args)
     backup_root = make_backup_root() if adopt else None
+    # `sync all` is the broad operation; focused skill invocations remain
+    # focused and do not unexpectedly adopt unrelated agent files.
+    sync_agents = (tuple(args.terms) == ("all",) and not args.repo and not args.dest
+                   and not getattr(args, "profile", None) and not args.skill)
+    agent_profiles: tuple[str | None, ...] = ()
+    if sync_agents and config.ai_agent_paths:
+        if config.profile_sets:
+            agent_profiles = tuple(
+                profile.name for profile in config.profile_sets
+                if any(name in config.ai_agent_paths for name in profile.destinations)
+                and any(bridge.enabled and bridge.agents_path is not None
+                        and bridge.name in {source.bridge for source in profile.sources}
+                        for bridge in config.bridges)
+            )
+        elif any(bridge.enabled and bridge.agents_path is not None for bridge in config.bridges):
+            agent_profiles = (None,)
+    agent_sources = tuple(dict.fromkeys(
+        bridge.name for profile_name in agent_profiles
+        for bridge in resolve_agent_sync_request(
+            config, (), tuple(config.ai_agent_paths) if profile_name is None else (), profile_name
+        )[1]
+    ))
+    if "all" not in request.repo_selectors:
+        request = replace(request, repo_selectors=tuple(dict.fromkeys((*request.repo_selectors, *agent_sources))))
     repo_preflight = _sync_repo_preflight(
         request.config,
         request.repo_selectors,
@@ -792,12 +816,21 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         skip_clone_bridges=frozenset(repo_preflight.skip_clone_bridges),
         skip_pull_bridges=frozenset(repo_preflight.skip_pull_bridges),
     )
-    plan = _build_sync_requests_plan(
-        requests, args, dry_run=dry_run, adopt=adopt, denylist=denylist, backup_root=backup_root,
-        preflight_notices=(*repo_preflight.notices, *materialization.notices),
-        preflight_errors=(*denylist_errors, *repo_preflight.errors, *materialization.errors),
-        skipped_missing_repos=materialization.skipped_missing_roots,
-    )
+    agent_only = bool(sync_agents and agent_profiles and config.profile_sets
+                      and not any(name in config.ai_skill_paths for profile in config.profile_sets
+                                  for name in profile.destinations))
+    if agent_only:
+        plan = SyncPlan(dry_run=dry_run, adopt=adopt, destinations=(), selected_discoveries=(),
+                        notices=(*repo_preflight.notices, *materialization.notices),
+                        errors=(*denylist_errors, *repo_preflight.errors, *materialization.errors),
+                        backup_root=backup_root)
+    else:
+        plan = _build_sync_requests_plan(
+            requests, args, dry_run=dry_run, adopt=adopt, denylist=denylist, backup_root=backup_root,
+            preflight_notices=(*repo_preflight.notices, *materialization.notices),
+            preflight_errors=(*denylist_errors, *repo_preflight.errors, *materialization.errors),
+            skipped_missing_repos=materialization.skipped_missing_roots,
+        )
     if (
         not dry_run
         and not adopt
@@ -816,7 +849,28 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             preflight_errors=(*denylist_errors, *repo_preflight.errors, *materialization.errors),
             skipped_missing_repos=materialization.skipped_missing_roots,
         )
+    agent_adopt = args.adopt or args.overwrite_local_copies
+    agent_plans = tuple(
+        build_agent_sync_plan(
+            config, (), tuple(config.ai_agent_paths) if profile_name is None else (),
+            dry_run=dry_run, adopt=agent_adopt,
+            backup_root=backup_root if agent_adopt else None, profile_name=profile_name,
+        )
+        for profile_name in agent_profiles
+    )
     _print_sync_plan(plan, stdout, verbosity=args.verbose)
+    for agent_plan in agent_plans:
+        for notice in agent_plan.notices:
+            print(notice, file=stdout)
+        for error in agent_plan.errors:
+            print(f"ERROR {error}", file=stdout)
+        for action in agent_plan.actions:
+            print(f"{action.action.upper()} agent {action.destination}:{action.agent.name} "
+                  f"{action.path} -> {action.agent.path}", file=stdout)
+    if any(agent_plan.has_blockers for agent_plan in agent_plans):
+        print("Agent sync blocked by errors or conflicts; no destination changes made", file=stderr)
+        _print_sync_summary(plan, "blocked", stdout)
+        return 1
 
     if plan.has_blockers:
         if plan.prunes and not dry_run:
@@ -846,6 +900,16 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         print(f"aiskillsync: apply failed: {exc}", file=stderr)
         _print_sync_summary(plan, "blocked", stdout)
         return 1
+    try:
+        created_agents = tuple(item for agent_plan in agent_plans
+                               for item in apply_agent_sync_plan(agent_plan))
+    except (OSError, ValueError) as exc:
+        print(f"aiskillsync: agent sync failed after skill apply; inspect and retry: {exc}", file=stderr)
+        _print_sync_summary(plan, "blocked", stdout)
+        return 1
+    if agent_plans:
+        print(f"Created {len(created_agents)} agent symlink(s)" if created_agents
+              else "No agent symlinks needed", file=stdout)
     if result.pruned:
         print("Removed stale symlinks:", file=stdout)
         for item in result.pruned:

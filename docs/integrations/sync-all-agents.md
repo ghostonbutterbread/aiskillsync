@@ -1,6 +1,6 @@
 # Sync all agent definitions integration dossier
 
-- **Status:** feature; initial red regression checkpoint
+- **Status:** feature; implementation awaiting independent review
 - **Owner:** Hermes, task t_05035b5e
 - **Branch / owning ref:** feat/sync-all-agents
 - **Base commit:** 0fe1071a091e2417bfb31dbaaccbe5cb39763f91
@@ -14,14 +14,14 @@ Make `sync all` synchronize configured agent definitions as well as skills while
 
 ## Implemented contract and evidence
 
-Two focused CLI tests describe mixed skill/agent destinations, dry-run no mutation, idempotence and agent-conflict blocking. RED on base: `python3 -m unittest tests.test_agents.AgentSyncTests.test_sync_all_projects_skills_and_agents_to_mixed_profile_destinations tests.test_agents.AgentSyncTests.test_sync_all_agent_conflict_blocks_skill_and_agent_writes` fails both as expected; no implementation yet. A prior skills-only `sync all` expectation is deliberately updated for the user-requested semantic change.
+Two initial focused CLI tests were red at checkpoint e52c69b5cbb6f3a0ef4f97e12cbb4a08bdb44237. Implementation plans skills and agents together for unfiltered `sync all`, collects agent-only profile sources into the same materialization, checks agent conflicts before destination changes, and preserves focused skill and standalone agent commands. Tests cover mixed and agent-only profiles, legacy configuration, profile isolation, conflict, dry-run and idempotence. `python3 -m unittest tests.test_agents` passed 24; `python3 -m unittest discover -s tests` passed 139. Full filesystem apply is not transactional; partial failure is reported. Independent review has not yet occurred.
 
 ## Blockers / deferred tests
 
-- Implement `sync all` using agent and skill planners; cover profile-only destinations, legacy configs, multiple profiles, filters, conflict handling, and repository materialization before review.
+- Extend and independently review profile-only destinations, multiple profiles, filters, conflict handling, race conditions, and repository materialization before integration.
 - Independently review and run full suite; reconcile beta before integration.
 - Hoster activation requires compatibility inventory, existing-file comparison, a reviewed conflict-safe plan and exact native consumer discovery. Bunny dynamic model routing must be verified separately.
 
 ## Resume / gates
 
-Resume by reading cli.py `cmd_sync`, `_resolve_sync_requests`, and agents.py `build_agent_sync_plan`, then implement and rerun focused tests. Integration target is beta; no main promotion. Do not claim Hoster activation without runtime verification. Dossier is temporary and must not remain on beta.
+Resume with independent review of cli.py `cmd_sync`, `_resolve_sync_requests`, and agents.py `build_agent_sync_plan`, followed by focused fixes and tests. Integration target is beta; no main promotion. Do not claim Hoster activation without runtime verification. Dossier is temporary and must not remain on beta.
