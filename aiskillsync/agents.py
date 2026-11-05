@@ -190,14 +190,21 @@ def build_agent_sync_plan(
         if len(definitions) > 1:
             errors.append(f"duplicate agent name {name!r}: " + ", ".join(str(agent.path) for agent in definitions))
     actions: list[AgentAction] = []
+    # Protect the actual configured source trees, not an entire checkout: a
+    # separate project-local .claude/agents directory is a valid destination.
+    source_roots = tuple(canonical_path(path) for bridge in config.bridges
+                         for path in (bridge.agents_dir, bridge.skills_dir) if path is not None)
+    # Individual source files may be symlinks outside those trees. Include all
+    # configured source roots, not only this profile, to avoid cross-profile
+    # adoption replacing another profile's canonical input.
+    source_files = {canonical_path(path) for bridge in config.bridges if bridge.agents_dir is not None
+                    for path in bridge.agents_dir.glob("*.md") if path.is_file()}
     for destination in destination_names:
         root = config.ai_agent_paths[destination]
         resolved_root = canonical_path(root)
-        overlapping = next((bridge for bridge in config.bridges
-                            if resolved_root.is_relative_to(canonical_path(bridge.path))
-                            or canonical_path(bridge.path).is_relative_to(resolved_root)), None)
-        if overlapping is not None:
-            errors.append(f"agent destination {destination}: root overlaps source checkout {overlapping.name}: {root}")
+        if any(resolved_root.is_relative_to(source) or source.is_relative_to(resolved_root)
+               for source in source_roots):
+            errors.append(f"agent destination {destination}: root overlaps configured source directory: {root}")
             continue
         conflict = destination_root_conflict(root)
         if conflict:
@@ -205,6 +212,10 @@ def build_agent_sync_plan(
             continue
         for agent in agents:
             path = root / f"{agent.name}.md"
+            candidate = canonical_path(path.parent) / path.name
+            if candidate in source_files:
+                errors.append(f"agent destination {destination}: {path} would replace a source file")
+                continue
             if path.is_symlink() and canonical_path(path) == canonical_path(agent.path):
                 action = "skip"
             elif not path.exists() and not path.is_symlink():
