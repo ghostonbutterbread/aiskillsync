@@ -924,20 +924,28 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         print(f"aiskillsync: apply failed: {exc}", file=stderr)
         _print_sync_summary(plan, "blocked", stdout)
         return 1
+    completed_agent_paths = []
     try:
-        created_agents = tuple(item for agent_plan in agent_plans
-                               for item in apply_agent_sync_plan(agent_plan))
+        created_agents = []
+        for agent_plan in agent_plans:
+            created_agents.extend(apply_agent_sync_plan(agent_plan))
+            completed_agent_paths.extend(str(action.path) for action in agent_plan.actions if action.action != "skip")
+            if any(action.action == "adopt" for action in agent_plan.actions):
+                assert agent_plan.backup_root is not None
+                print(f"Agent backups written to: {agent_plan.backup_root / 'agents'}", file=stdout)
     except (OSError, ValueError) as exc:
         print(f"aiskillsync: agent sync failed after skill apply; inspect and retry: {exc}", file=stderr)
+        if completed_agent_paths:
+            print("Earlier agent plans applied these paths; stop consumers and inspect before retrying: "
+                  + ", ".join(completed_agent_paths), file=stderr)
         _print_sync_summary(plan, "blocked", stdout)
         return 1
     if agent_plans:
-        print(f"Created {len(created_agents)} agent symlink(s)" if created_agents
-              else "No agent symlinks needed", file=stdout)
-        if created_agents and any(action.action == "adopt" for agent_plan in agent_plans
-                                  for action in agent_plan.actions):
-            assert backup_root is not None
-            print(f"Agent backups written to: {backup_root / 'agents'}", file=stdout)
+        native = any(action.content is not None for p in agent_plans for action in p.actions)
+        message = (f"Applied {len(created_agents)} agent projection(s)" if native
+                   else f"Created {len(created_agents)} agent symlink(s)")
+        print(message if created_agents
+              else ("No agent projections needed" if native else "No agent symlinks needed"), file=stdout)
     if result.pruned:
         print("Removed stale symlinks:", file=stdout)
         for item in result.pruned:
@@ -992,7 +1000,11 @@ def cmd_agents(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     except (OSError, ValueError) as exc:
         print(f"aiskillsync: agent sync failed: {exc}", file=stderr)
         return 1
-    print(f"Created {len(created)} agent symlink(s)" if created else "No agent symlinks needed", file=stdout)
+    native = any(action.content is not None for action in plan.actions)
+    message = (f"Applied {len(created)} agent projection(s)" if native
+               else f"Created {len(created)} agent symlink(s)")
+    print(message if created
+          else ("No agent projections needed" if native else "No agent symlinks needed"), file=stdout)
     if created and any(action.action == "adopt" for action in plan.actions):
         assert plan.backup_root is not None
         print(f"Backups written to: {plan.backup_root / 'agents'}", file=stdout)
@@ -1427,6 +1439,10 @@ def _with_adhoc_repositories(
             bridges=tuple(bridges),
             lanes=config.lanes,
             ai_skill_paths=config.ai_skill_paths,
+            ai_agent_paths=config.ai_agent_paths,
+            agent_formats=config.agent_formats,
+            bbh_launcher_path=config.bbh_launcher_path,
+            bbh_launcher_lane_group=config.bbh_launcher_lane_group,
             sync=config.sync,
             profile_sets=config.profile_sets,
         )

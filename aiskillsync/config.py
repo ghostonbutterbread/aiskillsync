@@ -126,6 +126,7 @@ class Config:
     sync: SyncConfig = field(default_factory=SyncConfig)
     profile_sets: tuple[ProfileSetConfig, ...] = field(default_factory=tuple)
     ai_agent_paths: dict[str, Path] = field(default_factory=dict)
+    agent_formats: dict[str, str] = field(default_factory=dict)
 
 
 def expand_path(value: str | Path) -> Path:
@@ -308,6 +309,16 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         if not isinstance(value, str) or not value:
             raise ConfigError(f"ai_agent_paths.{key} must be a non-empty string")
         agent_paths[key] = expand_path(value)
+    formats_raw = raw.get("agent_formats", {})
+    if not isinstance(formats_raw, dict):
+        raise ConfigError("agent_formats must be a mapping")
+    formats: dict[str, str] = {}
+    for name, value in formats_raw.items():
+        if name not in agent_paths:
+            raise ConfigError(f"agent_formats references unknown agent destination: {name}")
+        if value not in ("codex", "opencode"):
+            raise ConfigError(f"agent_formats.{name} must be codex or opencode")
+        formats[name] = value
     agent_roots: dict[Path, str] = {}
     skill_roots = {canonical_path(root) for root in destinations.values()}
     for name, root in agent_paths.items():
@@ -494,6 +505,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         lanes=tuple(lanes),
         ai_skill_paths=destinations,
         ai_agent_paths=agent_paths,
+        agent_formats=formats,
         bbh_launcher_path=bbh_launcher_path,
         bbh_launcher_lane_group=bbh_launcher_lane_group,
         sync=SyncConfig(
@@ -561,6 +573,11 @@ def config_to_text(config: Config) -> str:
     if config.ai_agent_paths:
         lines.extend(("", "ai_agent_paths:"))
         for key, value in sorted(config.ai_agent_paths.items()):
+            lines.append(f"  {key}: {_format_scalar(value)}")
+
+    if config.agent_formats:
+        lines.extend(("", "agent_formats:"))
+        for key, value in sorted(config.agent_formats.items()):
             lines.append(f"  {key}: {_format_scalar(value)}")
 
     if config.profile_sets:
