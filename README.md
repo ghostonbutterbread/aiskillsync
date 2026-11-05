@@ -321,11 +321,54 @@ names block apply. Destination filenames use the frontmatter name:
 `<ai_agent_paths.claude>/<name>.md` links to the original source file, even when
 its source filename differs.
 
-There are **no inferred agent roots** and no built-in Codex/Hermes conversion.
-Claude's `~/.claude/agents` is the primary supported format/consumer. Other roots
-can be explicitly configured only when their consumer accepts the source format;
-configuring a path does not establish compatibility. Agent roots cannot alias
-another agent or skill destination root.
+There are **no inferred agent roots**. Without `agent_formats`, this is a
+legacy raw Markdown link, not proof of native registration or compatible
+permissions. Configure only roots whose consumer accepts the source format.
+Agent roots cannot alias another agent or skill destination root.
+
+### Explicit native projections
+
+Opt in per destination (names are arbitrary, format values are not):
+
+```yaml
+ai_agent_paths:
+  codex: ~/.codex/agents
+  opencode: ~/.config/opencode/agents
+agent_formats:
+  codex: codex
+  opencode: opencode
+```
+
+The source must have only `name` and `description` frontmatter. Additional
+fields, including tool restrictions, model selection, spawn controls, and skill
+preloads, block native projection rather than being silently dropped. The source
+body becomes the native instructions without intentional rewriting. Codex writes
+`<name>.toml` with `name`, `description`, and `developer_instructions`;
+OpenCode writes `<name>.md` with `mode: subagent` and `permission.task: deny`.
+The OpenCode permission prohibits child delegation; it does not restrict other
+tools or automatically preload skills.
+No model is pinned. Codex can use its supported per-spawn model setting;
+OpenCode model selection depends on the installed version and launch surface,
+and an unpinned agent does not itself add per-invocation model selection.
+Runtime permissions, skills, and provider availability must be evaluated separately.
+
+Native projections are regular managed files, not symlinks. A source-path and
+content checksum marker identifies unmodified generated files for deterministic
+no-op or refresh. User-edited files, existing local definitions, and unexpected
+symlinks block even with `--adopt`: a backup does not reconcile their safety
+fields or distinct prompt. Compare and reconcile those definitions manually
+before migration; the synchronizer does not merge them. Source and destination
+states are checked before apply; multi-file failures can still be partial.
+Native files are not automatically pruned when a source disappears or a format
+changes. OMP is deliberately unsupported: its current `parseAgentFields` maps
+`spawns: []` to undefined, and an undefined spawn policy is unrestricted, so
+that superficially safe field does not ensure no delegation. Pi extensions and
+Hermes also have no native adapter here; select no format
+only if raw linking is independently verified for that exact consumer. Codex
+standalone agent discovery requires a Codex release that supports that contract.
+See [Codex subagents](https://developers.openai.com/codex/subagents),
+[OpenCode agents](https://opencode.ai/docs/agents/), and the
+[OMP task-agent discovery contract](https://github.com/can1357/oh-my-pi/blob/main/docs/task-agent-discovery.md).
 
 If `profile_sets` is active, `agents` requires a named profile instead of
 `--repo`/`--dest`, so it cannot bypass existing source/destination ownership:
@@ -365,7 +408,7 @@ again after cloning to inspect its definitions. Branch checks may run read-only
 Git commands. Apply requires an existing explicit config or existing default
 config; agent support is not enabled by the default template.
 
-Correct links are no-ops. Same-name files, directories, and unexpected/dangling
+For legacy raw links, correct links are no-ops. Same-name files, directories, and unexpected/dangling
 symlinks block the entire destination apply unless `--adopt` is explicitly used.
 Adoption moves the entry (not a symlink's target) to
 `~/.cache/aiskillsync-migration/<timestamp>/agents/<destination>/<name>.md` before

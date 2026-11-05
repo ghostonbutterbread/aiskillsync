@@ -908,8 +908,11 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         _print_sync_summary(plan, "blocked", stdout)
         return 1
     if agent_plans:
-        print(f"Created {len(created_agents)} agent symlink(s)" if created_agents
-              else "No agent symlinks needed", file=stdout)
+        native = any(action.content is not None for p in agent_plans for action in p.actions)
+        message = (f"Applied {len(created_agents)} agent projection(s)" if native
+                   else f"Created {len(created_agents)} agent symlink(s)")
+        print(message if created_agents
+              else ("No agent projections needed" if native else "No agent symlinks needed"), file=stdout)
     if result.pruned:
         print("Removed stale symlinks:", file=stdout)
         for item in result.pruned:
@@ -964,7 +967,11 @@ def cmd_agents(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     except (OSError, ValueError) as exc:
         print(f"aiskillsync: agent sync failed: {exc}", file=stderr)
         return 1
-    print(f"Created {len(created)} agent symlink(s)" if created else "No agent symlinks needed", file=stdout)
+    native = any(action.content is not None for action in plan.actions)
+    message = (f"Applied {len(created)} agent projection(s)" if native
+               else f"Created {len(created)} agent symlink(s)")
+    print(message if created
+          else ("No agent projections needed" if native else "No agent symlinks needed"), file=stdout)
     if created and any(action.action == "adopt" for action in plan.actions):
         assert plan.backup_root is not None
         print(f"Backups written to: {plan.backup_root / 'agents'}", file=stdout)
@@ -1399,6 +1406,10 @@ def _with_adhoc_repositories(
             bridges=tuple(bridges),
             lanes=config.lanes,
             ai_skill_paths=config.ai_skill_paths,
+            ai_agent_paths=config.ai_agent_paths,
+            agent_formats=config.agent_formats,
+            bbh_launcher_path=config.bbh_launcher_path,
+            bbh_launcher_lane_group=config.bbh_launcher_lane_group,
             sync=config.sync,
             profile_sets=config.profile_sets,
         )

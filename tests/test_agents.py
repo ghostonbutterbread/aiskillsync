@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -52,6 +53,121 @@ class AgentSyncTests(unittest.TestCase):
             cwd=ROOT, env={**os.environ, "HOME": str(self.base / "home")},
             text=True, capture_output=True,
         )
+
+    @unittest.skipUnless(importlib.util.find_spec("tomllib"), "tomllib requires Python 3.11+")
+    def test_native_codex_projection_preserves_prompt_and_inherits_model(self):
+        import tomllib
+        source = self.agent()
+        self.raw["agent_formats"] = {"claude": "codex"}
+        config = config_from_mapping(self.raw, self.config)
+        plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        self.assertFalse(plan.has_blockers, plan.errors)
+        apply_agent_sync_plan(plan)
+        target = self.destination / "reviewer.toml"
+        parsed = tomllib.loads(target.read_text())
+        self.assertEqual(parsed["name"], "reviewer")
+        self.assertEqual(parsed["description"], "Review changes")
+        self.assertEqual(parsed["developer_instructions"], source.read_text().split("---\n", 2)[2])
+        self.assertNotIn("model", parsed)
+        again = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        self.assertEqual(again.actions[0].action, "skip")
+
+    def test_native_updates_only_unmodified_managed_files_and_checks_source_races(self):
+        source = self.agent()
+        self.raw["agent_formats"] = {"claude": "opencode"}
+        config = config_from_mapping(self.raw, self.config)
+        first = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        source.write_text(source.read_text() + "changed")
+        with self.assertRaisesRegex(ValueError, "source changed"):
+            apply_agent_sync_plan(first)
+        first = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        apply_agent_sync_plan(first)
+        target = self.destination / "reviewer.md"
+        self.assertIn("task: deny", target.read_text())
+        self.assertNotIn("model:", target.read_text())
+        source.write_text(source.read_text() + " update")
+        update = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        self.assertEqual(update.actions[0].action, "update")
+        apply_agent_sync_plan(update)
+        self.assertTrue(target.read_text().endswith("changed update"))
+        target.write_text(target.read_text() + " local safety rule")
+        conflict = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False, adopt=True,
+                                         backup_root=self.base / "backups")
+        self.assertTrue(conflict.has_blockers)
+        self.assertEqual(conflict.actions[0].action, "conflict")
+        with self.assertRaises(ValueError):
+            apply_agent_sync_plan(conflict)
+        self.assertTrue(target.read_text().endswith("local safety rule"))
+
+    def test_native_rejects_untranslatable_source_fields_and_local_adoption(self):
+        source = self.agent()
+        source.write_text(source.read_text().replace("---\nReview", "spawns: []\n---\nReview"))
+        self.raw["agent_formats"] = {"claude": "opencode"}
+        config = config_from_mapping(self.raw, self.config)
+        plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        self.assertIn("cannot translate source frontmatter", " ".join(plan.errors))
+        self.assertFalse(self.destination.exists())
+        self.agent()
+        self.destination.mkdir(parents=True)
+        target = self.destination / "reviewer.md"
+        target.write_text("---\nspawns: []\nautoloadSkills: [security]\n---\nlocal prompt")
+        plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False, adopt=True,
+                                     backup_root=self.base / "backups")
+        self.assertTrue(plan.has_blockers)
+        self.assertEqual(plan.actions[0].action, "conflict")
+        self.assertIn("autoloadSkills", target.read_text())
+
+    def test_native_format_config_roundtrips_and_rejects_invalid(self):
+        self.raw["agent_formats"] = {"claude": "opencode"}
+        config = config_from_mapping(self.raw, self.config)
+        self.assertEqual(config_from_mapping(parse_simple_yaml(config_to_text(config)), self.config), config)
+        for formats in ({"missing": "codex"}, {"claude": "omp"}, {"claude": "pi"}, {"claude": []}, []):
+            with self.subTest(formats=formats), self.assertRaises(ConfigError):
+                self.raw["agent_formats"] = formats
+                config_from_mapping(self.raw, self.config)
+
+    @unittest.skipUnless(importlib.util.find_spec("tomllib"), "tomllib requires Python 3.11+")
+    def test_sync_all_projects_native_destinations_in_profile(self):
+        import tomllib
+        source = self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        self.raw["ai_agent_paths"]["codex"] = str(self.base / "codex" / "agents")
+        self.raw["agent_formats"] = {"claude": "opencode", "codex": "codex"}
+        self.raw["profile_sets"] = {"work": {"destinations": ["claude", "codex"],
+                                            "sources": [{"bridge": "bbh"}]}}
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("agent projection(s)", result.stdout)
+        markdown = (self.destination / "reviewer.md").read_text()
+        self.assertIn("mode: subagent\npermission:\n  task: deny", markdown)
+        self.assertTrue(markdown.endswith(source.read_text().split("---\n", 2)[2]))
+        parsed = tomllib.loads((self.base / "codex" / "agents" / "reviewer.toml").read_text())
+        self.assertEqual(parsed["developer_instructions"], source.read_text().split("---\n", 2)[2])
+        again = self.cli("sync", "all", "--dry-run")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(again.stdout.count("SKIP agent"), 2)
+
+    @unittest.skipUnless(os.environ.get("OPENCODE_TEST_BIN"), "set OPENCODE_TEST_BIN for native loader test")
+    def test_opencode_native_loader_discovers_projected_subagent(self):
+        source = self.agent()
+        self.raw["agent_formats"] = {"claude": "opencode"}
+        self.raw["ai_agent_paths"]["claude"] = str(self.base / "config" / "opencode" / "agents")
+        config = config_from_mapping(self.raw, self.config)
+        apply_agent_sync_plan(build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False))
+        target = Path(self.raw["ai_agent_paths"]["claude"]) / "reviewer.md"
+        self.assertTrue(target.read_text().endswith(source.read_text().split("---\n", 2)[2]))
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(self.base / "home"),
+               "TMPDIR": str(self.base), "XDG_CONFIG_HOME": str(self.base / "config"),
+               "XDG_DATA_HOME": str(self.base / "data"), "XDG_CACHE_HOME": str(self.base / "cache"),
+               "XDG_STATE_HOME": str(self.base / "state"), "OPENCODE_DISABLE_MODELS_FETCH": "true",
+               "OPENCODE_DISABLE_AUTOUPDATE": "true", "OPENCODE_DISABLE_CLAUDE_CODE": "true"}
+        result = subprocess.run([os.environ["OPENCODE_TEST_BIN"], "agent", "list", "--pure"], cwd=self.base,
+                                env=env, text=True, capture_output=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("reviewer", result.stdout)
 
     def test_duplicate_agent_names_block_the_whole_apply(self):
         self.agent("one.md", "reviewer")

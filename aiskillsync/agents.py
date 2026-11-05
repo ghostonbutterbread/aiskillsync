@@ -1,15 +1,15 @@
-"""Explicit agent-file discovery, planning, and symlink projection.
-
-Agent definitions are files, not SKILL.md directories. No provider translation
-or implicit runtime paths are performed here.
-"""
+"""Explicit agent discovery and opt-in native projection."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
+import os
 from pathlib import Path
 import re
 import shutil
+import tempfile
 
 from .config import BridgeConfig, Config, ConfigError, _strip_inline_comment, canonical_path, parse_simple_yaml
 from .lanes import effective_config
@@ -31,6 +31,8 @@ class AgentAction:
     agent: AgentDefinition
     action: str
     expected_state: tuple[object, ...]
+    content: str | None = None
+    source_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,60 @@ def _agent_metadata(lines: list[str]) -> dict[str, object]:
         else:
             metadata[key] = parse_simple_yaml(f"{key}: {value}")[key]
     return metadata
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _native_content(agent: AgentDefinition, provider: str) -> tuple[str, str]:
+    source = agent.path.read_text(encoding="utf-8")
+    lines = source.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        raise ValueError(f"{agent.path}: source frontmatter changed during planning")
+    try:
+        end = next(i for i, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") == "---")
+    except StopIteration as exc:
+        raise ValueError(f"{agent.path}: source frontmatter changed during planning") from exc
+    metadata = _agent_metadata([line.rstrip("\r\n") for line in lines[1:end]])
+    if metadata.get("name") != agent.name or metadata.get("description") != agent.description:
+        raise ValueError(f"{agent.path}: source metadata changed during planning")
+    # Do not silently drop source permissions, skill preloads, model routing, or
+    # unknown provider fields. Only the canonical portable two-field dialect is
+    # currently translated.
+    for line in lines[1:end]:
+        if line[:1].isspace() or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = re.match(r"^([\w-]+):", line)
+        if not match or match.group(1) not in ("name", "description"):
+            raise ValueError(f"{agent.path}: cannot translate source frontmatter field {line.strip()!r}")
+    prompt = "".join(lines[end + 1:])
+    quote = lambda value: json.dumps(value, ensure_ascii=False)
+    if provider == "codex":
+        body = (f"name = {quote(agent.name)}\ndescription = {quote(agent.description)}\n"
+                f"developer_instructions = {quote(prompt)}\n")
+        prefix = ""
+    else:
+        body = (f"description: {quote(agent.description)}\nmode: subagent\n"
+                f"permission:\n  task: deny\n---\n{prompt}")
+        prefix = "---\n"
+    identity = _digest(str(agent.path))
+    marker = f"# aiskillsync-native-v1 {identity} {_digest(body)}\n"
+    return prefix + marker + body, _digest(source)
+
+
+def _owned_native(path: Path, agent: AgentDefinition) -> str | None:
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+        marked = text[4:] if text.startswith("---\n") else text
+        marker, body = marked.split("\n", 1)
+        if marker == f"# aiskillsync-native-v1 {_digest(str(agent.path))} {_digest(body)}":
+            return text
+        return None
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
 def discover_agents(bridge: BridgeConfig) -> tuple[tuple[AgentDefinition, ...], tuple[str, ...]]:
@@ -148,7 +204,7 @@ def build_agent_sync_plan(
     profile_name: str | None = None,
     include_agents: tuple[str, ...] = (),
 ) -> AgentSyncPlan:
-    """Plan file symlinks without changing repositories or destinations."""
+    """Plan file projections without changing repositories or destinations."""
     config, bridges, destination_names = resolve_agent_sync_request(config, selectors, destination_names, profile_name)
     errors: list[str] = []
     notices: list[str] = []
@@ -192,14 +248,37 @@ def build_agent_sync_plan(
             errors.append(f"destination {destination}: {conflict}")
             continue
         for agent in agents:
-            path = root / f"{agent.name}.md"
-            if path.is_symlink() and canonical_path(path) == canonical_path(agent.path):
+            provider = config.agent_formats.get(destination)
+            content = None
+            source_digest = None
+            if provider:
+                try:
+                    content, source_digest = _native_content(agent, provider)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    errors.append(f"destination {destination}: {exc}")
+                    continue
+            path = root / f"{agent.name}.{'toml' if provider == 'codex' else 'md'}"
+            expected_state = _entry_state(path)
+            if provider:
+                if not path.exists() and not path.is_symlink():
+                    action = "write"
+                else:
+                    owned = _owned_native(path, agent)
+                    if owned is not None:
+                        action = "skip" if owned == content else "update"
+                    else:
+                        # A backup does not reconcile local safety or prompt.
+                        action = "conflict"
+            elif path.is_symlink() and canonical_path(path) == canonical_path(agent.path):
                 action = "skip"
             elif not path.exists() and not path.is_symlink():
                 action = "link"
             else:
                 action = "adopt" if adopt else "conflict"
-            actions.append(AgentAction(destination, path, agent, action, _entry_state(path)))
+            if expected_state != _entry_state(path):
+                errors.append(f"agent destination changed during planning: {path}")
+                continue
+            actions.append(AgentAction(destination, path, agent, action, expected_state, content, source_digest))
     return AgentSyncPlan(dry_run, tuple(actions), tuple(notices), tuple(errors), backup_root)
 
 
@@ -234,6 +313,8 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
             raise ValueError(error)
         if not action.agent.path.is_file():
             raise ValueError(f"agent source missing before apply: {action.agent.path}")
+        if action.source_digest is not None and _digest(action.agent.path.read_text(encoding="utf-8")) != action.source_digest:
+            raise ValueError(f"agent source changed before apply: {action.agent.path}")
     adoptions = tuple(action for action in plan.actions if action.action == "adopt")
     if adoptions and plan.backup_root is None:
         raise ValueError("agent adoption requires a backup root")
@@ -247,6 +328,24 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
         if action.action == "skip":
             continue
         action.path.parent.mkdir(parents=True, exist_ok=True)
+        if action.content is not None:
+            if _entry_state(action.path) != action.expected_state:
+                raise ValueError(f"agent destination changed before apply: {action.path}")
+            fd, temp_name = tempfile.mkstemp(prefix=".aiskillsync-agent-", dir=action.path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(action.content)
+                if action.action == "write":
+                    # Hard-link create refuses a concurrently created destination.
+                    os.link(temp_name, action.path)
+                    os.unlink(temp_name)
+                else:
+                    os.replace(temp_name, action.path)
+            finally:
+                if os.path.exists(temp_name):
+                    os.unlink(temp_name)
+            created.append(f"{action.destination}:{action.agent.name}")
+            continue
         backup = None
         if action.action == "adopt":
             assert plan.backup_root is not None
