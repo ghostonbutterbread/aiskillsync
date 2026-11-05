@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import errno
 import hashlib
@@ -161,19 +162,35 @@ def discover_agents(bridge: BridgeConfig) -> tuple[tuple[AgentDefinition, ...], 
 
 
 def _source_entries(path: Path) -> set[Path]:
-    """Return each directory entry traversed by an agent file symlink chain."""
+    """Return every directory entry traversed by a source's symlink chain."""
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    pending = deque(absolute.parts[1:])
     entries: set[Path] = set()
-    current = path
-    for _ in range(64):
-        entry = canonical_path(current.parent) / current.name
-        if entry in entries:
-            return entries
+    followed = 0
+    while pending:
+        component = pending.popleft()
+        if component == "..":
+            current = current.parent
+            continue
+        if component == ".":
+            continue
+        entry = current / component
         entries.add(entry)
         if not entry.is_symlink():
-            return entries
+            current = entry
+            continue
+        followed += 1
+        if followed > 64:
+            raise ConfigError(f"agent source symlink chain exceeds 64 entries: {path}")
         target = entry.readlink()
-        current = target if target.is_absolute() else entry.parent / target
-    raise ConfigError(f"agent source symlink chain exceeds 64 entries: {path}")
+        if target.is_absolute():
+            current = Path(target.anchor)
+            parts = target.parts[1:]
+        else:
+            parts = target.parts
+        pending.extendleft(reversed(parts))
+    return entries
 
 
 def resolve_agent_sync_request(
