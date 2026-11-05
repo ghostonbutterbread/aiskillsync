@@ -343,6 +343,28 @@ class AgentSyncTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.source / ".claude" / "agents" / "reviewer.md").resolve(), agent)
 
+    def test_agent_adoption_does_not_redirect_another_source_symlink_chain(self):
+        agent = self.agent()
+        other = self.base / "other"
+        (other / "agents").mkdir(parents=True)
+        self.destination.mkdir(parents=True)
+        original = self.base / "original.md"
+        original.write_text("---\nname: reviewer\ndescription: Original\n---\nORIGINAL\n")
+        intermediate = self.destination / "reviewer.md"
+        intermediate.symlink_to(original)
+        other_source = other / "agents" / "reviewer.md"
+        other_source.symlink_to(intermediate)
+        self.raw["bridges"].append({"name": "other", "path": str(other), "agents_path": "agents"})
+        config = config_from_mapping(self.raw, self.config)
+        plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False,
+                                     adopt=True, backup_root=self.base / "backup")
+        self.assertTrue(plan.has_blockers)
+        with self.assertRaises(ValueError):
+            apply_agent_sync_plan(plan)
+        self.assertEqual(intermediate.readlink(), original)
+        self.assertIn("ORIGINAL", other_source.read_text())
+        self.assertIn("Review safely.", agent.read_text())
+
     def test_agent_plan_respects_explicit_lane_override(self):
         self.agent()
         other = self.base / "beta"

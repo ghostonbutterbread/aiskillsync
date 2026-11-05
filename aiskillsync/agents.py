@@ -101,6 +101,22 @@ def discover_agents(bridge: BridgeConfig) -> tuple[tuple[AgentDefinition, ...], 
     return tuple(agents), tuple(notices)
 
 
+def _source_entries(path: Path) -> set[Path]:
+    """Return each directory entry traversed by an agent file symlink chain."""
+    entries: set[Path] = set()
+    current = path
+    for _ in range(64):
+        entry = canonical_path(current.parent) / current.name
+        if entry in entries:
+            return entries
+        entries.add(entry)
+        if not entry.is_symlink():
+            return entries
+        target = entry.readlink()
+        current = target if target.is_absolute() else entry.parent / target
+    raise ConfigError(f"agent source symlink chain exceeds 64 entries: {path}")
+
+
 def resolve_agent_sync_request(
     config: Config,
     selectors: tuple[str, ...],
@@ -197,8 +213,9 @@ def build_agent_sync_plan(
     # Individual source files may be symlinks outside those trees. Include all
     # configured source roots, not only this profile, to avoid cross-profile
     # adoption replacing another profile's canonical input.
-    source_files = {canonical_path(path) for bridge in config.bridges if bridge.agents_dir is not None
-                    for path in bridge.agents_dir.glob("*.md") if path.is_file()}
+    source_files = {entry for bridge in config.bridges if bridge.agents_dir is not None
+                    for path in bridge.agents_dir.glob("*.md")
+                    if path.is_file() or path.is_symlink() for entry in _source_entries(path)}
     for destination in destination_names:
         root = config.ai_agent_paths[destination]
         resolved_root = canonical_path(root)
