@@ -339,8 +339,12 @@ agent_formats:
   opencode: opencode
 ```
 
-The source must have only `name` and `description` frontmatter. Additional
-fields, including tool restrictions, model selection, spawn controls, and skill
+The source must have `name` and `description` frontmatter; `advertise: true`
+is also accepted as an opt-in to discoverability. Pi-subagents parent-prompt
+advertisement has no verified equivalent here: OpenCode discovers the projected
+subagent, while Codex discovery and advertisement remain unverified. Do not
+assume equivalent parent-prompt visibility. `advertise: false` and other fields,
+including tool restrictions, model selection, spawn controls, and skill
 preloads, block native projection rather than being silently dropped. The source
 body becomes the native instructions without intentional rewriting. Codex writes
 `<name>.toml` with `name`, `description`, and `developer_instructions`;
@@ -371,6 +375,10 @@ the complete owning sources or reconcile the paths manually. Markers removed or
 destroyed by an external edit cannot be identified as managed without a manifest.
 
 New files use no-clobber creation, but a multi-file apply is not transactional.
+Source changes detected after publishing a native file fail with an incomplete
+apply receipt; the file may still be discoverable and must be reconciled manually.
+Stop other writers when adopting: directory backups and cross-filesystem copies
+are not atomic and can leave partial backups on failure.
 On a caught partial failure the error lists installed paths and any adoption
 backup root: stop consumers, inspect/preserve concurrent edits, and manually
 reconcile or restore before retrying. An abrupt process or machine failure may

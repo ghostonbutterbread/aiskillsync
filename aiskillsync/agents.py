@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
@@ -91,12 +92,14 @@ def _native_content(agent: AgentDefinition, provider: str) -> tuple[str, str]:
     if metadata.get("name") != agent.name or metadata.get("description") != agent.description:
         raise ValueError(f"{agent.path}: source metadata changed during planning")
     # Do not silently drop source permissions, skill preloads, model routing, or
-    # unknown provider fields. Only the canonical portable two-field dialect is
-    # currently translated.
+    # unknown provider fields. An explicit opt-in to parent discovery is safe
+    # to project as a discoverable native role; exact advertisement is provider-dependent.
     for line in lines[1:end]:
         if line[:1].isspace() or not line.strip() or line.lstrip().startswith("#"):
             continue
         match = re.match(r"^([\w-]+):", line)
+        if match and match.group(1) == "advertise" and _strip_inline_comment(line.split(":", 1)[1]).strip() == "true":
+            continue
         if not match or match.group(1) not in ("name", "description"):
             raise ValueError(f"{agent.path}: cannot translate source frontmatter field {line.strip()!r}")
     prompt = "".join(lines[end + 1:])
@@ -268,9 +271,9 @@ def build_agent_sync_plan(
                     try:
                         with entry.open("rb") as handle:
                             first = handle.readline()
-                            marker = handle.readline() if first == b"---\n" else first
-                        match = re.fullmatch(rb"# aiskillsync-native-v1 ([0-9a-f]{64}) [0-9a-f]{64}\n?", marker)
-                        marker_format = "opencode" if first == b"---\n" else "codex"
+                            marker = handle.readline() if first.rstrip(b"\r\n") == b"---" else first
+                        match = re.fullmatch(rb"# aiskillsync-native-v1 ([0-9a-f]{64}) [0-9a-f]{64}(?:\r?\n)?", marker)
+                        marker_format = "opencode" if first.rstrip(b"\r\n") == b"---" else "codex"
                         if match:
                             owner = valid_ids.get(match.group(1).decode())
                             expected_name = f"{owner.name}.{'toml' if provider == 'codex' else 'md'}" if owner else None
@@ -339,6 +342,31 @@ def _entry_state(path: Path) -> tuple[object, ...]:
             str(path.readlink()) if path.is_symlink() else None)
 
 
+def _move_no_clobber(source: Path, destination: Path) -> None:
+    """Move an adopted entry without replacing an independently created backup."""
+    state = _entry_state(source)
+    if source.is_dir() and not source.is_symlink():
+        shutil.copytree(source, destination, symlinks=True)
+        if _entry_state(source) != state:
+            raise ValueError(f"agent destination changed during backup: {source}")
+        shutil.rmtree(source)
+        return
+    try:
+        os.link(source, destination, follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        if source.is_symlink():
+            destination.symlink_to(source.readlink())
+        else:
+            with source.open("rb") as src, destination.open("xb") as dst:
+                shutil.copyfileobj(src, dst)
+            shutil.copystat(source, destination)
+    if _entry_state(source) != state:
+        raise ValueError(f"agent destination changed during backup: {source}")
+    source.unlink()
+
+
 def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
     """Apply a non-blocked file projection; a dry-run plan cannot write."""
     if plan.has_blockers:
@@ -393,6 +421,8 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                         # Hard-link create refuses a concurrently created destination.
                         os.link(temp_name, action.path)
                         completed.append(action.path)
+                        if _digest(action.agent.path.read_text(encoding="utf-8")) != action.source_digest:
+                            raise ValueError(f"agent source changed during apply: {action.agent.path}")
                         os.unlink(temp_name)
                     else:
                         raise ValueError(f"unsupported native action: {action.action}")
@@ -406,12 +436,12 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                 assert plan.backup_root is not None
                 backup = plan.backup_root / "agents" / action.destination / action.path.name
                 backup.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(action.path), str(backup))
+                _move_no_clobber(action.path, backup)
             try:
                 action.path.symlink_to(action.agent.path)
             except OSError:
                 if backup is not None and not (action.path.exists() or action.path.is_symlink()):
-                    shutil.move(str(backup), str(action.path))
+                    _move_no_clobber(backup, action.path)
                 raise
             created.append(f"{action.destination}:{action.agent.name}")
             completed.append(action.path)

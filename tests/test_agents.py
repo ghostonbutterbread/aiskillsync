@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import errno
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -72,6 +73,129 @@ class AgentSyncTests(unittest.TestCase):
         self.assertNotIn("model", parsed)
         again = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
         self.assertEqual(again.actions[0].action, "skip")
+
+    @unittest.skipUnless(importlib.util.find_spec("tomllib"), "tomllib requires Python 3.11+")
+    def test_bunny_advertise_true_projects_instructions_for_both_formats(self):
+        import tomllib
+        for role in ("hunter", "recon", "verifier", "reporter"):
+            source = self.agent(f"bunny-{role}.md", f"bunny-{role}", f"Bunny {role}")
+            source.write_text(source.read_text().replace("description:", "advertise: true\ndescription:", 1))
+        for provider in ("codex", "opencode"):
+            with self.subTest(provider=provider):
+                self.raw["ai_agent_paths"]["claude"] = str(self.base / provider)
+                self.raw["agent_formats"] = {"claude": provider}
+                plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",), dry_run=False)
+                self.assertFalse(plan.has_blockers, plan.errors)
+                apply_agent_sync_plan(plan)
+                for role in ("hunter", "recon", "verifier", "reporter"):
+                    target = self.base / provider / (f"bunny-{role}.toml" if provider == "codex" else f"bunny-{role}.md")
+                    content = target.read_text()
+                    if provider == "codex":
+                        self.assertEqual(tomllib.loads(content)["developer_instructions"], "Review safely.\n")
+                    else:
+                        self.assertTrue(content.endswith("Review safely.\n"))
+                        self.assertIn("mode: subagent\npermission:\n  task: deny", content)
+        source.write_text(source.read_text().replace("advertise: true", "advertise: false"))
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",), dry_run=False)
+        self.assertIn("cannot translate", " ".join(plan.errors))
+
+    def test_crlf_managed_stale_projection_blocks_for_both_formats(self):
+        source = self.agent()
+        self.agent("other.md", "other")
+        for provider in ("codex", "opencode"):
+            with self.subTest(provider=provider):
+                self.raw["ai_agent_paths"]["claude"] = str(self.base / provider)
+                self.raw["agent_formats"] = {"claude": provider}
+                config = config_from_mapping(self.raw, self.config)
+                apply_agent_sync_plan(build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False))
+                target = self.base / provider / ("reviewer.toml" if provider == "codex" else "reviewer.md")
+                target.write_bytes(target.read_bytes().replace(b"\n", b"\r\n"))
+                self.assertFalse(build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False).has_blockers)
+                original = target.read_bytes()
+                source.unlink()
+                plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False, include_agents=("other",))
+                self.assertIn("stale or invalid managed agent", " ".join(plan.errors))
+                with self.assertRaises(ValueError):
+                    apply_agent_sync_plan(plan)
+                self.assertEqual(target.read_bytes(), original)
+                self.agent()
+
+    def test_source_change_at_link_is_reported_as_incomplete(self):
+        source = self.agent()
+        self.raw["agent_formats"] = {"claude": "opencode"}
+        config = config_from_mapping(self.raw, self.config)
+        plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        real_link = os.link
+        def race(src, dst, *args, **kwargs):
+            source.write_text(source.read_text() + "new instruction\n")
+            return real_link(src, dst, *args, **kwargs)
+        with patch("aiskillsync.agents.os.link", side_effect=race):
+            with self.assertRaisesRegex(ValueError, "incomplete.*reviewer.md.*source changed"):
+                apply_agent_sync_plan(plan)
+        self.assertFalse((self.destination / "reviewer.md").read_text().endswith("new instruction\n"))
+
+    def test_adoption_concurrent_backup_creation_never_clobbers(self):
+        self.agent()
+        self.destination.mkdir(parents=True)
+        target = self.destination / "reviewer.md"
+        target.write_text("original")
+        backup = self.base / "backups"
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",),
+                                     dry_run=False, adopt=True, backup_root=backup)
+        saved = backup / "agents" / "claude" / "reviewer.md"
+        real_link = os.link
+        def race(src, dst, *args, **kwargs):
+            if Path(dst) == saved:
+                saved.write_text("concurrent backup")
+            return real_link(src, dst, *args, **kwargs)
+        with patch("aiskillsync.agents.os.link", side_effect=race):
+            with self.assertRaisesRegex(ValueError, "incomplete.*backup"):
+                apply_agent_sync_plan(plan)
+        self.assertEqual(saved.read_text(), "concurrent backup")
+        self.assertEqual(target.read_text(), "original")
+
+    def test_adoption_cross_filesystem_copy_is_exclusive(self):
+        self.agent()
+        self.destination.mkdir(parents=True)
+        target = self.destination / "reviewer.md"
+        target.write_text("original")
+        backup = self.base / "backups"
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",),
+                                     dry_run=False, adopt=True, backup_root=backup)
+        with patch("aiskillsync.agents.os.link", side_effect=OSError(errno.EXDEV, "different filesystems")):
+            apply_agent_sync_plan(plan)
+        self.assertEqual((backup / "agents" / "claude" / "reviewer.md").read_text(), "original")
+        self.assertTrue(target.is_symlink())
+
+    def test_adoption_cross_filesystem_backup_collision_preserves_both(self):
+        self.agent()
+        self.destination.mkdir(parents=True)
+        target = self.destination / "reviewer.md"
+        target.write_text("original")
+        backup = self.base / "backups"
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",),
+                                     dry_run=False, adopt=True, backup_root=backup)
+        saved = backup / "agents" / "claude" / "reviewer.md"
+        def race(*args, **kwargs):
+            saved.write_text("concurrent backup")
+            raise OSError(errno.EXDEV, "different filesystems")
+        with patch("aiskillsync.agents.os.link", side_effect=race):
+            with self.assertRaisesRegex(ValueError, "incomplete.*backup"):
+                apply_agent_sync_plan(plan)
+        self.assertEqual(target.read_text(), "original")
+        self.assertEqual(saved.read_text(), "concurrent backup")
+
+    def test_adoption_directory_backup_preserves_contents(self):
+        self.agent()
+        target = self.destination / "reviewer.md"
+        target.mkdir(parents=True)
+        (target / "local.txt").write_text("original")
+        backup = self.base / "backups"
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",),
+                                     dry_run=False, adopt=True, backup_root=backup)
+        apply_agent_sync_plan(plan)
+        self.assertEqual((backup / "agents" / "claude" / "reviewer.md" / "local.txt").read_text(), "original")
+        self.assertTrue(target.is_symlink())
 
     def test_native_updates_only_unmodified_managed_files_and_checks_source_races(self):
         source = self.agent()
