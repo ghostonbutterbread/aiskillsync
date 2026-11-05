@@ -1,6 +1,6 @@
 # Sync all agent definitions integration dossier
 
-- **Status:** native merge checkpoint; integration blocked by a confirmed directory-symlink-chain source safety defect and fresh independent combined review
+- **Status:** combined feature; source-chain fixes await independent review
 - **Owner:** Hermes, task t_05035b5e
 - **Branch / worktree:** `feat/sync-all-agents`, `/home/ryushe/worktrees/aiskillsync-sync-all-agents`
 - **Base / intended target:** `0fe1071a091e2417bfb31dbaaccbe5cb39763f91`, `beta` (`origin/beta` fetched at that SHA)
@@ -26,7 +26,7 @@ Combined planning blocks an agent destination below a skill link projected by th
 
 ## Blockers, risks, and next review
 
-The latest independent targeted review of `c224b88` confirms the file-symlink fix but found a concrete **directory-symlink-chain counterexample**: `_source_entries` canonicalizes parents without retaining intermediate directory symlink entries; adopting a destination directory symlink referenced by another source can redirect or break that source. This remains unfixed in the joint checkpoint and blocks integration. Parent must reproduce it on the combined branch, fix it without losing safe project-local destinations, add regression coverage across raw and relevant native paths, rerun the suite, and obtain independent review. Do not claim the branch review-approved.
+Review of `c224b88` found a directory-symlink-chain case; combined checkpoint c78692915d5a0af7a39ebc52660b651afbe90ba3 resolves it and independently verified 178 tests. A subsequent combined review found the same dependency through a skill source; that was reproduced red and fixed by tracing lexical paths of discoverable skill sources before agent adoption. Parent ran 64 focused tests and 179 full-suite tests; the new correction still needs independent review. Do not claim the branch review-approved.
 
 Fresh independent review must inspect this branch tip against `origin/beta`, rerun the full suite, check overlap detection (planned and pre-existing links, aliases, nested safe paths, and any cross-profile actions), skill filters, agent-only behavior, lane override and switch rollback, and review the dossier against actual receipts. Confirm beta has not advanced and reconcile if necessary before integration. No fresh post-fix independent review is claimed.
 

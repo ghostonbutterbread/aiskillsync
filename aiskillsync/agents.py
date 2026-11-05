@@ -293,6 +293,17 @@ def build_agent_sync_plan(
     source_files = {entry for bridge in config.bridges if bridge.agents_dir is not None
                     for path in bridge.agents_dir.glob("*.md")
                     if path.is_file() or path.is_symlink() for entry in _source_entries(path)}
+    # Track the lexical path to each discoverable skill too. Its directory or
+    # SKILL.md may transitively reference an agent destination to be adopted.
+    for bridge in config.bridges:
+        skills_dir = bridge.skills_dir
+        if not skills_dir.is_dir():
+            continue
+        candidates = (skills_dir.rglob("SKILL.md") if bridge.skill_layout == "categorized"
+                      else (child / "SKILL.md" for child in skills_dir.iterdir() if child.is_dir()))
+        for skill_md in candidates:
+            if skill_md.is_file() or skill_md.is_symlink():
+                source_files.update(_source_entries(skill_md))
     for destination in destination_names:
         root = config.ai_agent_paths[destination]
         resolved_root = canonical_path(root)

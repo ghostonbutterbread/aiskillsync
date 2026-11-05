@@ -794,6 +794,24 @@ class AgentSyncTests(unittest.TestCase):
         self.assertEqual(intermediate.readlink(), original)
         self.assertIn("ORIGINAL", other_source.read_text())
 
+    def test_agent_adoption_does_not_redirect_skill_source_symlink(self):
+        self.agent()
+        skills = self.source / "skills"
+        skills.mkdir()
+        self.destination.mkdir(parents=True)
+        real_skill = self.base / "real-skill"
+        real_skill.mkdir()
+        (real_skill / "SKILL.md").write_text("Original skill")
+        intermediate = self.destination / "reviewer.md"
+        intermediate.symlink_to(real_skill, target_is_directory=True)
+        (skills / "safe").symlink_to(intermediate, target_is_directory=True)
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all", "--adopt")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(intermediate.readlink(), real_skill)
+        self.assertEqual((skills / "safe" / "SKILL.md").read_text(), "Original skill")
+
     def test_agent_plan_respects_explicit_lane_override(self):
         self.agent()
         other = self.base / "beta"
