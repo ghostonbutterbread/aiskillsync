@@ -1,7 +1,7 @@
 # Sync all agent definitions integration dossier
 
 - **Status:** review fixes implemented; fresh independent review required before beta integration
-- **Owner:** Hermes, task t_05035b5e; review-fix subagent owns this worktree until handoff
+- **Owner:** Hermes, task t_05035b5e
 - **Branch / worktree:** `feat/sync-all-agents`, `/home/ryushe/worktrees/aiskillsync-sync-all-agents`
 - **Base / intended target:** `0fe1071a091e2417bfb31dbaaccbe5cb39763f91`, `beta` (`origin/beta` fetched at that SHA)
 - **Last immutable implementation checkpoint before review fixes:** `d3e254d5f61a8ecad61964b590092090c2e7ecc6`; red-test checkpoint `e52c69b5cbb6f3a0ef4f97e12cbb4a08bdb44237`. The review-fix commit is the current branch tip; inspect it separately.
@@ -17,6 +17,7 @@ Combined planning blocks an agent destination below a skill link projected by th
 - Independent review found source mutation through nested roots, switch adopting local agents, a double-effective lane override failure, legacy agent-only failure, and exclusion-filter ambiguity. New fixture-only tests reproduced them against `d3e254d`; the first red run reported five failures across nested, switch, agent-only, and CLI filter cases. An isolated archive baseline also reproduced the pre-existing-link source write and configured-denylist failure, and raised the expected `no enabled selected sources configure agents_path` error for lane override. The overwrite-alias case was separately red before its fix.
 - `python3 -m unittest discover -s tests`: **148 passed**, with isolated `HOME`, `XDG_CONFIG_HOME`, and `XDG_CACHE_HOME`; log `/home/ryushe/.hermes/profiles/bugfix/cache/scratch/ais-suite.JVS5JA/test.log`. The test intentionally prints simulated rollback and wrong-branch diagnostics. One preceding full run exposed an atime-sensitive dry-run snapshot; the fixture now compares mutation-relevant stat fields rather than access time, and the final run passed.
 - `python3 -m compileall -q aiskillsync tests` and `git diff --check` passed. An isolated package install reported CLI `aiskillsync 0.1.28` and installed metadata `0.1.28`. The first no-build-isolation attempt lacked setuptools; normal isolated build succeeded.
+- A fresh review of 970e9e5962f725cc8c3ad2c8e006efcd5884a5a2 found source overlap on first projection and missing agent-backup receipts. Both were reproduced with focused red tests and corrected against direct and symlink-alias paths. `python3 -m unittest tests.test_agents` passed 35; `python3 -m unittest discover -s tests` passed 150. Reviewer had independently run the prior 148-test suite on Python 3.11, 3.12, and 3.14. Another independent review of these fixes is required.
 - No real user configuration was changed. No Hoster operation, merge, push, or deployment was performed.
 
 ## Blockers, risks, and next review

@@ -876,7 +876,9 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             for skill_action in projected_skills:
                 path = skill_action.status.path
                 future_entry = path.parent.resolve(strict=False) / path.name
-                if root.is_relative_to(future_entry) or root.is_relative_to(path.resolve(strict=False)):
+                source = skill_action.skill.path.resolve(strict=False)
+                if (root.is_relative_to(future_entry) or root.is_relative_to(path.resolve(strict=False))
+                        or root.is_relative_to(source)):
                     print(f"ERROR agent destination {root} overlaps projected skill {path}", file=stderr)
                     _print_sync_summary(plan, "blocked", stdout)
                     return 1
@@ -932,6 +934,10 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     if agent_plans:
         print(f"Created {len(created_agents)} agent symlink(s)" if created_agents
               else "No agent symlinks needed", file=stdout)
+        if created_agents and any(action.action == "adopt" for agent_plan in agent_plans
+                                  for action in agent_plan.actions):
+            assert backup_root is not None
+            print(f"Agent backups written to: {backup_root / 'agents'}", file=stdout)
     if result.pruned:
         print("Removed stale symlinks:", file=stdout)
         for item in result.pruned:

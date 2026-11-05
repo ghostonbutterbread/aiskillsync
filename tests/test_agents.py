@@ -253,6 +253,42 @@ class AgentSyncTests(unittest.TestCase):
         self.assertFalse((skill / "agents").exists())
         self.assertTrue((root / "safe").is_symlink())
 
+    def test_sync_all_rejects_agent_root_inside_unlinked_skill_source(self):
+        self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        alias = self.base / "source-alias"
+        alias.symlink_to(skill, target_is_directory=True)
+        self.raw["ai_skill_paths"]["claude"] = str(self.base / "dest")
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        for agent_root in (skill / "agents", alias / "agents"):
+            with self.subTest(agent_root=agent_root):
+                self.raw["ai_agent_paths"]["claude"] = str(agent_root)
+                self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+                for args in (("--dry-run",), ()):
+                    result = self.cli("sync", "all", *args)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertFalse((skill / "agents").exists())
+                    self.assertFalse((self.base / "dest" / "safe").exists())
+
+    def test_sync_all_prints_agent_backup_path_without_skill_adoptions(self):
+        self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        self.destination.mkdir(parents=True)
+        existing = self.destination / "reviewer.md"
+        existing.write_text("preserve local")
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all", "--adopt")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        backups = list((self.base / "home" / ".cache" / "aiskillsync-migration").glob("*/agents/claude/reviewer.md"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), "preserve local")
+        self.assertIn(str(backups[0].parents[1]), result.stdout)
+
     def test_agent_plan_respects_explicit_lane_override(self):
         self.agent()
         other = self.base / "beta"
