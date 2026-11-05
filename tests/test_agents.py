@@ -190,8 +190,8 @@ class AgentSyncTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "changed since planning")
         self.assertFalse((self.base / "backups").exists())
 
-    def test_skill_sync_ignores_agent_only_destinations_in_mixed_profiles(self):
-        self.agent()
+    def test_sync_all_projects_skills_and_agents_to_mixed_profile_destinations(self):
+        agent = self.agent()
         skill = self.source / "skills" / "safe"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("safe")
@@ -199,11 +199,34 @@ class AgentSyncTests(unittest.TestCase):
         self.raw["profile_sets"] = {"work": {
             "destinations": ["claude", "agents-only"], "sources": [{"bridge": "bbh"}]}}
         self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        preview = self.cli("sync", "all", "--dry-run")
+        self.assertEqual(preview.returncode, 0, preview.stderr + preview.stdout)
+        self.assertFalse(self.destination.exists())
+        self.assertFalse((self.base / "claude" / "skills").exists())
         result = self.cli("sync", "all")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertTrue((self.base / "claude" / "skills" / "safe").is_symlink())
-        self.assertFalse(self.destination.exists())
-        self.assertFalse((self.base / "agents-only").exists())
+        self.assertEqual((self.destination / "reviewer.md").resolve(), agent)
+        self.assertEqual((self.base / "agents-only" / "reviewer.md").resolve(), agent)
+        again = self.cli("sync", "all", "--dry-run")
+        self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
+        self.assertIn("SKIP agent", again.stdout)
+
+    def test_sync_all_agent_conflict_blocks_skill_and_agent_writes(self):
+        self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        self.destination.mkdir(parents=True)
+        existing = self.destination / "reviewer.md"
+        existing.write_text("local agent")
+        self.raw["profile_sets"] = {"work": {
+            "destination": "claude", "sources": [{"bridge": "bbh"}]}}
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all")
+        self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(existing.read_text(), "local agent")
+        self.assertFalse((self.base / "claude" / "skills" / "safe").exists())
 
     def test_config_rejects_shared_agent_roots_and_agent_skill_root_aliases(self):
         self.raw["ai_agent_paths"]["alias"] = str(self.destination)
