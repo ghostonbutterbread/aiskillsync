@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from aiskillsync.config import ConfigError, config_from_mapping, config_to_text, parse_simple_yaml
 from aiskillsync.agents import build_agent_sync_plan, apply_agent_sync_plan
@@ -87,8 +88,16 @@ class AgentSyncTests(unittest.TestCase):
         self.assertNotIn("model:", target.read_text())
         source.write_text(source.read_text() + " update")
         update = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
-        self.assertEqual(update.actions[0].action, "update")
-        apply_agent_sync_plan(update)
+        self.assertEqual(update.actions[0].action, "conflict")
+        self.assertIn("manual retirement", " ".join(update.errors))
+        target.write_text(target.read_text() + " concurrent edit")
+        with self.assertRaises(ValueError):
+            apply_agent_sync_plan(update)
+        self.assertTrue(target.read_text().endswith("concurrent edit"))
+        backup = self.base / "reviewer-previous.md"
+        target.rename(backup)
+        apply_agent_sync_plan(build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False))
+        self.assertTrue(backup.read_text().endswith("changed concurrent edit"))
         self.assertTrue(target.read_text().endswith("changed update"))
         target.write_text(target.read_text() + " local safety rule")
         conflict = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False, adopt=True,
@@ -116,6 +125,122 @@ class AgentSyncTests(unittest.TestCase):
         self.assertTrue(plan.has_blockers)
         self.assertEqual(plan.actions[0].action, "conflict")
         self.assertIn("autoloadSkills", target.read_text())
+
+    def test_native_concurrent_create_is_never_overwritten(self):
+        self.agent()
+        self.raw["agent_formats"] = {"claude": "opencode"}
+        config = config_from_mapping(self.raw, self.config)
+        plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        real_link = os.link
+        def race(src, dst):
+            Path(dst).write_text("concurrent local edit")
+            return real_link(src, dst)
+        with patch("aiskillsync.agents.os.link", side_effect=race):
+            with self.assertRaises(FileExistsError):
+                apply_agent_sync_plan(plan)
+        self.assertEqual((self.destination / "reviewer.md").read_text(), "concurrent local edit")
+
+    def test_native_multi_file_failure_reports_recoverable_incomplete_state(self):
+        self.agent()
+        self.agent("second.md", "second")
+        self.raw["agent_formats"] = {"claude": "opencode"}
+        config = config_from_mapping(self.raw, self.config)
+        plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        real_link = os.link
+        def fail_second(src, dst):
+            if Path(dst).name == "second.md":
+                raise OSError("injected failure")
+            return real_link(src, dst)
+        with patch("aiskillsync.agents.os.link", side_effect=fail_second):
+            with self.assertRaisesRegex(ValueError, "incomplete.*reviewer.md.*injected failure"):
+                apply_agent_sync_plan(plan)
+        self.assertIn("task: deny", (self.destination / "reviewer.md").read_text())
+        self.assertFalse((self.destination / "second.md").exists())
+        self.assertFalse(list(self.destination.glob(".aiskillsync-agent-*")))
+        retry = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        apply_agent_sync_plan(retry)
+        self.assertTrue((self.destination / "second.md").exists())
+
+    def test_native_stale_malformed_and_renamed_sources_block_without_mutation(self):
+        source = self.agent()
+        self.agent("other.md", "other")
+        self.raw["agent_formats"] = {"claude": "opencode"}
+        config = config_from_mapping(self.raw, self.config)
+        apply_agent_sync_plan(build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False))
+        target = self.destination / "reviewer.md"
+        original = target.read_bytes()
+        for broken in ("---\nname: reviewer\n---\n", "# Not an agent\n", None,
+                       "---\nname: renamed\ndescription: New name\n---\n"):
+            if broken is None:
+                source.unlink()
+            else:
+                source.write_text(broken)
+            plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False,
+                                         include_agents=("other",))
+            self.assertIn("stale or invalid managed agent", " ".join(plan.errors))
+            with self.assertRaises(ValueError):
+                apply_agent_sync_plan(plan)
+            self.assertEqual(target.read_bytes(), original)
+        self.assertTrue((self.destination / "other.md").exists())
+
+    def test_agent_source_destination_overlap_is_blocked(self):
+        self.agent()
+        for root in (self.agents, self.agents / "nested", self.source):
+            self.raw["ai_agent_paths"]["claude"] = str(root)
+            self.raw["agent_formats"] = {"claude": "opencode"}
+            plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",), dry_run=False)
+            self.assertIn("overlap", " ".join(plan.errors))
+            with self.assertRaises(ValueError):
+                apply_agent_sync_plan(plan)
+
+    def test_stale_raw_agent_link_blocks(self):
+        source = self.agent()
+        self.agent("other.md", "other")
+        config = config_from_mapping(self.raw, self.config)
+        apply_agent_sync_plan(build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False))
+        source.unlink()
+        plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
+        self.assertIn("stale or invalid managed agent link", " ".join(plan.errors))
+        self.assertTrue((self.destination / "reviewer.md").is_symlink())
+
+    def test_native_format_change_blocks_old_projection(self):
+        self.agent()
+        self.raw["agent_formats"] = {"claude": "opencode"}
+        config = config_from_mapping(self.raw, self.config)
+        apply_agent_sync_plan(build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False))
+        self.raw["agent_formats"] = {"claude": "codex"}
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",), dry_run=False)
+        self.assertIn("stale or invalid managed agent", " ".join(plan.errors))
+        self.assertTrue((self.destination / "reviewer.md").exists())
+        self.assertFalse((self.destination / "reviewer.toml").exists())
+
+    def test_sync_all_prints_agent_backup_without_skill_adoption(self):
+        self.agent()
+        self.destination.mkdir(parents=True)
+        (self.destination / "reviewer.md").write_text("local")
+        self.raw.pop("ai_skill_paths")
+        self.raw["profile_sets"] = {"work": {"destination": "claude", "sources": [{"bridge": "bbh"}]}}
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all", "--adopt")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        backups = list((self.base / "home" / ".cache" / "aiskillsync-migration").glob("*/agents/claude/reviewer.md"))
+        self.assertEqual(len(backups), 1)
+        self.assertIn(str(backups[0].parents[1]), result.stdout)
+        self.assertEqual(backups[0].read_text(), "local")
+
+    def test_adoption_failure_reports_backup_location(self):
+        self.agent()
+        self.destination.mkdir(parents=True)
+        target = self.destination / "reviewer.md"
+        target.write_text("local")
+        backup = self.base / "backups"
+        config = config_from_mapping(self.raw, self.config)
+        plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False,
+                                     adopt=True, backup_root=backup)
+        with patch.object(Path, "symlink_to", side_effect=OSError("injected failure")):
+            with self.assertRaisesRegex(ValueError, "adoption backups:.*backups/agents"):
+                apply_agent_sync_plan(plan)
+        self.assertEqual(target.read_text(), "local")
 
     def test_native_format_config_roundtrips_and_rejects_invalid(self):
         self.raw["agent_formats"] = {"claude": "opencode"}
@@ -273,12 +398,16 @@ class AgentSyncTests(unittest.TestCase):
         (self.destination / "other.md").write_text("local other")
         (self.destination / "unmanaged.md").write_text("private")
         stale = self.destination / "stale.md"
-        stale.symlink_to(self.agents / "gone.md")
+        stale.symlink_to(self.base / "foreign-gone.md")
         self.write_config()
-        before = {p: p.lstat() for p in self.base.rglob("*")}
+        # Directory and file reads can update atime; compare durable state.
+        def snapshot():
+            return {p: (s.st_mode, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                    for p in self.base.rglob("*") for s in (p.lstat(),)}
+        before = snapshot()
         result = self.cli("agents", "--dest", "claude", "--agent", "reviewer", "--adopt", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual({p: p.lstat() for p in self.base.rglob("*")}, before)
+        self.assertEqual(snapshot(), before)
         applied = self.cli("agents", "--dest", "claude", "--agent", "reviewer", "--adopt")
         self.assertEqual(applied.returncode, 0, applied.stderr + applied.stdout)
         self.assertEqual((self.destination / "reviewer.md").resolve(), source)

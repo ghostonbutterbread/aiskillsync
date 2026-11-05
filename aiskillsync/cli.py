@@ -900,11 +900,20 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         print(f"aiskillsync: apply failed: {exc}", file=stderr)
         _print_sync_summary(plan, "blocked", stdout)
         return 1
+    completed_agent_paths = []
     try:
-        created_agents = tuple(item for agent_plan in agent_plans
-                               for item in apply_agent_sync_plan(agent_plan))
+        created_agents = []
+        for agent_plan in agent_plans:
+            created_agents.extend(apply_agent_sync_plan(agent_plan))
+            completed_agent_paths.extend(str(action.path) for action in agent_plan.actions if action.action != "skip")
+            if any(action.action == "adopt" for action in agent_plan.actions):
+                assert agent_plan.backup_root is not None
+                print(f"Agent backups written to: {agent_plan.backup_root / 'agents'}", file=stdout)
     except (OSError, ValueError) as exc:
         print(f"aiskillsync: agent sync failed after skill apply; inspect and retry: {exc}", file=stderr)
+        if completed_agent_paths:
+            print("Earlier agent plans applied these paths; stop consumers and inspect before retrying: "
+                  + ", ".join(completed_agent_paths), file=stderr)
         _print_sync_summary(plan, "blocked", stdout)
         return 1
     if agent_plans:

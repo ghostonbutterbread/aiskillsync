@@ -353,14 +353,30 @@ and an unpinned agent does not itself add per-invocation model selection.
 Runtime permissions, skills, and provider availability must be evaluated separately.
 
 Native projections are regular managed files, not symlinks. A source-path and
-content checksum marker identifies unmodified generated files for deterministic
-no-op or refresh. User-edited files, existing local definitions, and unexpected
-symlinks block even with `--adopt`: a backup does not reconcile their safety
-fields or distinct prompt. Compare and reconcile those definitions manually
-before migration; the synchronizer does not merge them. Source and destination
-states are checked before apply; multi-file failures can still be partial.
-Native files are not automatically pruned when a source disappears or a format
-changes. OMP is deliberately unsupported: its current `parseAgentFields` maps
+content checksum marker identifies generated files. Existing local definitions,
+modified projections and unexpected symlinks block even with `--adopt`: a
+backup does not reconcile safety fields or distinct prompts. Destination and
+source agent roots must not overlap, including through symlinks.
+
+Native updates are deliberately **not** automatic: a portable check followed by
+replacement could overwrite an edit made between the two operations. Stop the
+consumer and other writers, inspect the existing file and move it to an
+operator-chosen backup outside every agent discovery root, then rerun sync to
+create the replacement. To roll back, stop writers again, preserve the new file
+outside discovery, and restore the backup. A source removal, malformed source,
+rename or format change similarly blocks on identifiable stale managed files;
+review and retire them manually, rather than leaving them active silently.
+Unmatched markers from other profiles sharing a destination also block: select
+the complete owning sources or reconcile the paths manually. Markers removed or
+destroyed by an external edit cannot be identified as managed without a manifest.
+
+New files use no-clobber creation, but a multi-file apply is not transactional.
+On a caught partial failure the error lists installed paths and any adoption
+backup root: stop consumers, inspect/preserve concurrent edits, and manually
+reconcile or restore before retrying. An abrupt process or machine failure may
+not emit that receipt; inspect the full destination before restarting. Skill and
+agent application and separate profile plans are not a single transaction.
+OMP is deliberately unsupported: its current `parseAgentFields` maps
 `spawns: []` to undefined, and an undefined spawn policy is unrestricted, so
 that superficially safe field does not ensure no delegation. Pi extensions and
 Hermes also have no native adapter here; select no format

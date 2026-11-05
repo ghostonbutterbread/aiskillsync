@@ -232,6 +232,7 @@ def build_agent_sync_plan(
     missing = set(include_agents) - {agent.name for agent in agents}
     if missing and not pending_clone:
         errors.append("selected agent names not found: " + ", ".join(sorted(missing)))
+    discovered = tuple(agents)
     if include_agents:
         agents = [agent for agent in agents if agent.name in include_agents]
     by_name: dict[str, list[AgentDefinition]] = {}
@@ -247,6 +248,49 @@ def build_agent_sync_plan(
         if conflict:
             errors.append(f"destination {destination}: {conflict}")
             continue
+        for bridge in config.bridges:
+            if bridge.agents_dir is None:
+                continue
+            source_root = canonical_path(bridge.agents_dir)
+            destination_root = canonical_path(root)
+            if source_root == destination_root or source_root in destination_root.parents or destination_root in source_root.parents:
+                errors.append(f"destination {destination}: agent destination and source overlap: {root} and {bridge.agents_dir}")
+        # The marker contains only a source-path digest, not a manifest with a
+        # reversible path. Unmatched managed files must be reconciled by the
+        # operator, never silently left active or automatically deleted.
+        if root.is_dir() and not pending_clone:
+            provider = config.agent_formats.get(destination)
+            valid_ids = {_digest(str(agent.path)): agent for agent in discovered}
+            for entry in sorted(root.iterdir()):
+                if entry.suffix not in {".md", ".toml"}:
+                    continue
+                if entry.is_file() and not entry.is_symlink():
+                    try:
+                        with entry.open("rb") as handle:
+                            first = handle.readline()
+                            marker = handle.readline() if first == b"---\n" else first
+                        match = re.fullmatch(rb"# aiskillsync-native-v1 ([0-9a-f]{64}) [0-9a-f]{64}\n?", marker)
+                        marker_format = "opencode" if first == b"---\n" else "codex"
+                        if match:
+                            owner = valid_ids.get(match.group(1).decode())
+                            expected_name = f"{owner.name}.{'toml' if provider == 'codex' else 'md'}" if owner else None
+                            if owner is None or provider is None or marker_format != provider or expected_name != entry.name:
+                                errors.append(f"stale or invalid managed agent {entry}: source missing, malformed, renamed, or outside selected sources; preserve and reconcile manually")
+                            else:
+                                try:
+                                    expected_content, _ = _native_content(owner, provider)
+                                    if _owned_native(entry, owner) != expected_content:
+                                        errors.append(f"stale or edited managed agent {entry}: manual retirement or reconciliation required; stop the consumer and preserve a backup outside its discovery root")
+                                except (OSError, UnicodeError, ValueError) as exc:
+                                    errors.append(f"invalid managed agent source for {entry}: {exc}")
+                    except OSError as exc:
+                        errors.append(f"cannot inspect agent destination {entry}: {exc}")
+                elif entry.is_symlink():
+                    target = canonical_path(entry)
+                    expected = {canonical_path(agent.path): f"{agent.name}.md" for agent in discovered}
+                    if any(bridge.agents_dir is not None and canonical_path(bridge.agents_dir) in target.parents
+                           for bridge in bridges) and (provider is not None or expected.get(target) != entry.name):
+                        errors.append(f"stale or invalid managed agent link {entry}: source missing or malformed; preserve and reconcile manually")
         for agent in agents:
             provider = config.agent_formats.get(destination)
             content = None
@@ -265,7 +309,11 @@ def build_agent_sync_plan(
                 else:
                     owned = _owned_native(path, agent)
                     if owned is not None:
-                        action = "skip" if owned == content else "update"
+                        if owned == content:
+                            action = "skip"
+                        else:
+                            action = "conflict"
+                            errors.append(f"native update requires manual retirement of {path}: stop the consumer, move the file outside its discovery root to a safe backup, then re-run sync; restore the backup if needed")
                     else:
                         # A backup does not reconcile local safety or prompt.
                         action = "conflict"
@@ -324,39 +372,53 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
         if backup.exists() or backup.is_symlink():
             raise ValueError(f"agent backup already exists: {backup}")
     created: list[str] = []
-    for action in plan.actions:
-        if action.action == "skip":
-            continue
-        action.path.parent.mkdir(parents=True, exist_ok=True)
-        if action.content is not None:
+    completed: list[Path] = []
+    try:
+        for action in plan.actions:
+            if action.action == "skip":
+                continue
             if _entry_state(action.path) != action.expected_state:
                 raise ValueError(f"agent destination changed before apply: {action.path}")
-            fd, temp_name = tempfile.mkstemp(prefix=".aiskillsync-agent-", dir=action.path.parent)
+            if action.source_digest is not None and _digest(action.agent.path.read_text(encoding="utf-8")) != action.source_digest:
+                raise ValueError(f"agent source changed before apply: {action.agent.path}")
+            action.path.parent.mkdir(parents=True, exist_ok=True)
+            if action.content is not None:
+                if _entry_state(action.path) != action.expected_state:
+                    raise ValueError(f"agent destination changed before apply: {action.path}")
+                fd, temp_name = tempfile.mkstemp(prefix=".aiskillsync-agent-", dir=action.path.parent)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                        handle.write(action.content)
+                    if action.action == "write":
+                        # Hard-link create refuses a concurrently created destination.
+                        os.link(temp_name, action.path)
+                        completed.append(action.path)
+                        os.unlink(temp_name)
+                    else:
+                        raise ValueError(f"unsupported native action: {action.action}")
+                finally:
+                    if os.path.exists(temp_name):
+                        os.unlink(temp_name)
+                created.append(f"{action.destination}:{action.agent.name}")
+                continue
+            backup = None
+            if action.action == "adopt":
+                assert plan.backup_root is not None
+                backup = plan.backup_root / "agents" / action.destination / action.path.name
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(action.path), str(backup))
             try:
-                with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                    handle.write(action.content)
-                if action.action == "write":
-                    # Hard-link create refuses a concurrently created destination.
-                    os.link(temp_name, action.path)
-                    os.unlink(temp_name)
-                else:
-                    os.replace(temp_name, action.path)
-            finally:
-                if os.path.exists(temp_name):
-                    os.unlink(temp_name)
+                action.path.symlink_to(action.agent.path)
+            except OSError:
+                if backup is not None and not (action.path.exists() or action.path.is_symlink()):
+                    shutil.move(str(backup), str(action.path))
+                raise
             created.append(f"{action.destination}:{action.agent.name}")
-            continue
-        backup = None
-        if action.action == "adopt":
-            assert plan.backup_root is not None
-            backup = plan.backup_root / "agents" / action.destination / action.path.name
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(action.path), str(backup))
-        try:
-            action.path.symlink_to(action.agent.path)
-        except OSError:
-            if backup is not None and not (action.path.exists() or action.path.is_symlink()):
-                shutil.move(str(backup), str(action.path))
-            raise
-        created.append(f"{action.destination}:{action.agent.name}")
+            completed.append(action.path)
+    except (OSError, ValueError) as exc:
+        if completed or (adoptions and plan.backup_root):
+            paths = ", ".join(str(path) for path in completed)
+            backup = f"; adoption backups: {plan.backup_root / 'agents'}" if adoptions and plan.backup_root else ""
+            raise ValueError(f"agent apply incomplete after writing [{paths}]{backup}; stop consumers and inspect these paths, preserve concurrent edits, and manually reconcile or restore backups before retrying: {exc}") from exc
+        raise
     return tuple(created)
