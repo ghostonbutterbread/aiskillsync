@@ -274,9 +274,19 @@ multiple skills without recursively importing unrelated `SKILL.md` files.
 
 ## Agent-file synchronization
 
-Agent definitions are opt-in **files**, separate from skill directories. Use
-`agents` to project Claude-compatible definitions from BBH's canonical `agents/`
-directory without running skill sync or changing its projection manifest:
+Agent definitions are opt-in **files**, separate from skill directories. An
+unfiltered `sync all` synchronizes configured skills **and** configured agent
+files, once per selected profile (or to configured agent roots in legacy
+non-profile configuration). Its plan shows both kinds; an agent conflict blocks
+both before destination changes. Skill-filtered operations (`--skill`,
+`--exclude-skill`, `--denylist`, or an applicable configured migration denylist)
+do not sync agents. `switch` changes skills and launchers only. Agent roots
+under a skill projected by the same operation are blocked; other nested roots
+remain supported. Git refresh may occur before a plan is blocked; filesystem
+errors while applying can still leave earlier actions in place.
+
+Use `agents` to project Claude-compatible definitions from BBH's canonical
+`agents/` directory without running skill sync or changing its projection manifest:
 
 ```yaml
 bridges:
@@ -314,11 +324,78 @@ names block apply. Destination filenames use the frontmatter name:
 `<ai_agent_paths.claude>/<name>.md` links to the original source file, even when
 its source filename differs.
 
-There are **no inferred agent roots** and no built-in Codex/Hermes conversion.
-Claude's `~/.claude/agents` is the primary supported format/consumer. Other roots
-can be explicitly configured only when their consumer accepts the source format;
-configuring a path does not establish compatibility. Agent roots cannot alias
-another agent or skill destination root.
+There are **no inferred agent roots**. Without `agent_formats`, this is a
+legacy raw Markdown link, not proof of native registration or compatible
+permissions. Configure only roots whose consumer accepts the source format.
+Agent roots cannot alias another agent or skill destination root.
+
+### Explicit native projections
+
+Opt in per destination (names are arbitrary, format values are not):
+
+```yaml
+ai_agent_paths:
+  codex: ~/.codex/agents
+  opencode: ~/.config/opencode/agents
+agent_formats:
+  codex: codex
+  opencode: opencode
+```
+
+The source must have `name` and `description` frontmatter; `advertise: true`
+is also accepted as an opt-in to discoverability. Pi-subagents parent-prompt
+advertisement has no verified equivalent here: OpenCode discovers the projected
+subagent, while Codex discovery and advertisement remain unverified. Do not
+assume equivalent parent-prompt visibility. `advertise: false` and other fields,
+including tool restrictions, model selection, spawn controls, and skill
+preloads, block native projection rather than being silently dropped. The source
+body becomes the native instructions without intentional rewriting. Codex writes
+`<name>.toml` with `name`, `description`, and `developer_instructions`;
+OpenCode writes `<name>.md` with `mode: subagent` and `permission.task: deny`.
+The OpenCode permission prohibits child delegation; it does not restrict other
+tools or automatically preload skills.
+No model is pinned. Codex can use its supported per-spawn model setting;
+OpenCode model selection depends on the installed version and launch surface,
+and an unpinned agent does not itself add per-invocation model selection.
+Runtime permissions, skills, and provider availability must be evaluated separately.
+
+Native projections are regular managed files, not symlinks. A source-path and
+content checksum marker identifies generated files. Existing local definitions,
+modified projections and unexpected symlinks block even with `--adopt`: a
+backup does not reconcile safety fields or distinct prompts. Destination and
+source agent roots must not overlap, including through symlinks.
+
+Native updates are deliberately **not** automatic: a portable check followed by
+replacement could overwrite an edit made between the two operations. Stop the
+consumer and other writers, inspect the existing file and move it to an
+operator-chosen backup outside every agent discovery root, then rerun sync to
+create the replacement. To roll back, stop writers again, preserve the new file
+outside discovery, and restore the backup. A source removal, malformed source,
+rename or format change similarly blocks on identifiable stale managed files;
+review and retire them manually, rather than leaving them active silently.
+Unmatched markers from other profiles sharing a destination also block: select
+the complete owning sources or reconcile the paths manually. Markers removed or
+destroyed by an external edit cannot be identified as managed without a manifest.
+
+New files use no-clobber creation, but a multi-file apply is not transactional.
+Source changes detected after publishing a native file fail with an incomplete
+apply receipt; the file may still be discoverable and must be reconciled manually.
+Stop other writers when adopting: directory backups and cross-filesystem copies
+are not atomic and can leave partial backups on failure.
+On a caught partial failure the error lists installed paths and any adoption
+backup root: stop consumers, inspect/preserve concurrent edits, and manually
+reconcile or restore before retrying. An abrupt process or machine failure may
+not emit that receipt; inspect the full destination before restarting. Skill and
+agent application and separate profile plans are not a single transaction.
+OMP is deliberately unsupported: its current `parseAgentFields` maps
+`spawns: []` to undefined, and an undefined spawn policy is unrestricted, so
+that superficially safe field does not ensure no delegation. Pi extensions and
+Hermes also have no native adapter here; select no format
+only if raw linking is independently verified for that exact consumer. Codex
+standalone agent discovery requires a Codex release that supports that contract.
+See [Codex subagents](https://developers.openai.com/codex/subagents),
+[OpenCode agents](https://opencode.ai/docs/agents/), and the
+[OMP task-agent discovery contract](https://github.com/can1357/oh-my-pi/blob/main/docs/task-agent-discovery.md).
 
 If `profile_sets` is active, `agents` requires a named profile instead of
 `--repo`/`--dest`, so it cannot bypass existing source/destination ownership:
@@ -358,7 +435,7 @@ again after cloning to inspect its definitions. Branch checks may run read-only
 Git commands. Apply requires an existing explicit config or existing default
 config; agent support is not enabled by the default template.
 
-Correct links are no-ops. Same-name files, directories, and unexpected/dangling
+For legacy raw links, correct links are no-ops. Same-name files, directories, and unexpected/dangling
 symlinks block the entire destination apply unless `--adopt` is explicitly used.
 Adoption moves the entry (not a symlink's target) to
 `~/.cache/aiskillsync-migration/<timestamp>/agents/<destination>/<name>.md` before
