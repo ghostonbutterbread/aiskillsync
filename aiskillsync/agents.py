@@ -106,9 +106,11 @@ def resolve_agent_sync_request(
     selectors: tuple[str, ...],
     destination_names: tuple[str, ...],
     profile_name: str | None = None,
+    *,
+    lane_overrides: dict[str, str] | None = None,
 ) -> tuple[Config, tuple[BridgeConfig, ...], tuple[str, ...]]:
     """Enforce the same bridge/destination ownership as skill profiles and lanes."""
-    config = effective_config(config)
+    config = effective_config(config, lane_overrides)
     if config.sync.mode != "symlink":
         raise ConfigError("agent sync supports only sync.mode: symlink")
     if config.profile_sets:
@@ -147,9 +149,12 @@ def build_agent_sync_plan(
     backup_root: Path | None = None,
     profile_name: str | None = None,
     include_agents: tuple[str, ...] = (),
+    lane_overrides: dict[str, str] | None = None,
 ) -> AgentSyncPlan:
     """Plan file symlinks without changing repositories or destinations."""
-    config, bridges, destination_names = resolve_agent_sync_request(config, selectors, destination_names, profile_name)
+    config, bridges, destination_names = resolve_agent_sync_request(
+        config, selectors, destination_names, profile_name, lane_overrides=lane_overrides
+    )
     errors: list[str] = []
     notices: list[str] = []
     agents: list[AgentDefinition] = []

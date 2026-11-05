@@ -278,9 +278,12 @@ Agent definitions are opt-in **files**, separate from skill directories. An
 unfiltered `sync all` synchronizes configured skills **and** configured agent
 files, once per selected profile (or to configured agent roots in legacy
 non-profile configuration). Its plan shows both kinds; an agent conflict blocks
-both before destination changes. `sync all --skill NAME` remains a focused skill
-operation and does not sync agents. Git refresh may occur before a plan is blocked;
-filesystem errors while applying can still leave earlier actions in place.
+both before destination changes. Skill-filtered operations (`--skill`,
+`--exclude-skill`, `--denylist`, or an applicable configured migration denylist)
+do not sync agents. `switch` changes skills and launchers only. Agent roots
+under a skill projected by the same operation are blocked; other nested roots
+remain supported. Git refresh may occur before a plan is blocked; filesystem
+errors while applying can still leave earlier actions in place.
 
 Use `agents` to project Claude-compatible definitions from BBH's canonical
 `agents/` directory without running skill sync or changing its projection manifest:

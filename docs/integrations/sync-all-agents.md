@@ -1,27 +1,26 @@
 # Sync all agent definitions integration dossier
 
-- **Status:** feature; implementation awaiting independent review
-- **Owner:** Hermes, task t_05035b5e
-- **Branch / owning ref:** feat/sync-all-agents
-- **Base commit:** 0fe1071a091e2417bfb31dbaaccbe5cb39763f91
-- **Intended integration target:** beta
-- **Latest immutable recovery checkpoint:** see branch tip
-- **Feature implementation commits:** none yet
+- **Status:** review fixes implemented; fresh independent review required before beta integration
+- **Owner:** Hermes, task t_05035b5e; review-fix subagent owns this worktree until handoff
+- **Branch / worktree:** `feat/sync-all-agents`, `/home/ryushe/worktrees/aiskillsync-sync-all-agents`
+- **Base / intended target:** `0fe1071a091e2417bfb31dbaaccbe5cb39763f91`, `beta` (`origin/beta` fetched at that SHA)
+- **Last immutable implementation checkpoint before review fixes:** `d3e254d5f61a8ecad61964b590092090c2e7ecc6`; red-test checkpoint `e52c69b5cbb6f3a0ef4f97e12cbb4a08bdb44237`. The review-fix commit is the current branch tip; inspect it separately.
 
-## Intent and scope
+## Intent and implemented contract
 
-Make `sync all` synchronize configured agent definitions as well as skills while preserving profile isolation, collision safety, honest dry-run behavior and one repository materialization. Preserve independently filtered agent and skill commands. Hoster deployment and native consumer verification are separate gates. Avoid overwriting local agents or assuming native harness compatibility.
+Unfiltered `sync all` synchronizes configured skills and agent definitions, preserving profile isolation and a shared repository materialization. Focused skill operations and standalone `agents` retain their scope; `switch` and its rollback remain skills/launchers only. A legacy configuration with only agent destinations now works. Skill filters (`--skill`, `--exclude-skill`, `--denylist`, and an applicable configured migration denylist) suppress agent sync; the configured migration denylist also applies to the `--overwrite` alias. Plain unfiltered `sync all` still includes agents.
 
-## Implemented contract and evidence
+Combined planning blocks an agent destination below a skill link projected by the same operation, including existing symlink targets and aliased parents, before destination writes. Other nested destinations remain allowed. Agent planning uses the original config and explicit lane overrides so an effective config is not filtered a second time.
 
-Two initial focused CLI tests were red at checkpoint e52c69b5cbb6f3a0ef4f97e12cbb4a08bdb44237. Implementation plans skills and agents together for unfiltered `sync all`, collects agent-only profile sources into the same materialization, checks agent conflicts before destination changes, and preserves focused skill and standalone agent commands. Tests cover mixed and agent-only profiles, legacy configuration, profile isolation, conflict, dry-run and idempotence. `python3 -m unittest tests.test_agents` passed 24; `python3 -m unittest discover -s tests` passed 139. Full filesystem apply is not transactional; partial failure is reported. Independent review has not yet occurred.
+## Evidence
 
-## Blockers / deferred tests
+- Independent review found source mutation through nested roots, switch adopting local agents, a double-effective lane override failure, legacy agent-only failure, and exclusion-filter ambiguity. New fixture-only tests reproduced them against `d3e254d`; the first red run reported five failures across nested, switch, agent-only, and CLI filter cases. An isolated archive baseline also reproduced the pre-existing-link source write and configured-denylist failure, and raised the expected `no enabled selected sources configure agents_path` error for lane override. The overwrite-alias case was separately red before its fix.
+- `python3 -m unittest discover -s tests`: **148 passed**, with isolated `HOME`, `XDG_CONFIG_HOME`, and `XDG_CACHE_HOME`; log `/home/ryushe/.hermes/profiles/bugfix/cache/scratch/ais-suite.JVS5JA/test.log`. The test intentionally prints simulated rollback and wrong-branch diagnostics. One preceding full run exposed an atime-sensitive dry-run snapshot; the fixture now compares mutation-relevant stat fields rather than access time, and the final run passed.
+- `python3 -m compileall -q aiskillsync tests` and `git diff --check` passed. An isolated package install reported CLI `aiskillsync 0.1.28` and installed metadata `0.1.28`. The first no-build-isolation attempt lacked setuptools; normal isolated build succeeded.
+- No real user configuration was changed. No Hoster operation, merge, push, or deployment was performed.
 
-- Extend and independently review profile-only destinations, multiple profiles, filters, conflict handling, race conditions, and repository materialization before integration.
-- Independently review and run full suite; reconcile beta before integration.
-- Hoster activation requires compatibility inventory, existing-file comparison, a reviewed conflict-safe plan and exact native consumer discovery. Bunny dynamic model routing must be verified separately.
+## Blockers, risks, and next review
 
-## Resume / gates
+Fresh independent review must inspect this branch tip against `origin/beta`, rerun the full suite, check overlap detection (planned and pre-existing links, aliases, nested safe paths, and any cross-profile actions), skill filters, agent-only behavior, lane override and switch rollback, and review the dossier against actual receipts. Confirm beta has not advanced and reconcile if necessary before integration. No fresh post-fix independent review is claimed.
 
-Resume with independent review of cli.py `cmd_sync`, `_resolve_sync_requests`, and agents.py `build_agent_sync_plan`, followed by focused fixes and tests. Integration target is beta; no main promotion. Do not claim Hoster activation without runtime verification. Dossier is temporary and must not remain on beta.
+The combined apply is not transactional: repository refresh can precede a blocked plan, and I/O failure or concurrent filesystem changes between planning and application can leave partial writes. The overlap guard addresses projected skill actions in the combined plan, not arbitrary concurrent symlink replacement or unrelated standalone operations. Native consumer compatibility, Bunny dynamic model routing, and Hoster inventory/conflict-safe activation remain unverified; they require a separate authorized runtime gate. No stable promotion is implied. Remove this temporary dossier from beta at accepted integration.

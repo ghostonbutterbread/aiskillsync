@@ -669,6 +669,7 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         apply=False,
         verbose=args.verbose,
         lane_overrides={group: lane},
+        skills_only=True,
     )
     print(f"Switching {group} to lane {lane}", file=stdout)
     if stale:
@@ -780,7 +781,9 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     # `sync all` is the broad operation; focused skill invocations remain
     # focused and do not unexpectedly adopt unrelated agent files.
     sync_agents = (tuple(args.terms) == ("all",) and not args.repo and not args.dest
-                   and not getattr(args, "profile", None) and not args.skill)
+                   and not getattr(args, "profile", None) and not args.skill
+                   and not args.exclude_skill and not args.denylist and not denylist
+                   and not getattr(args, "skills_only", False))
     agent_profiles: tuple[str | None, ...] = ()
     if sync_agents and config.ai_agent_paths:
         if config.profile_sets:
@@ -796,7 +799,8 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     agent_sources = tuple(dict.fromkeys(
         bridge.name for profile_name in agent_profiles
         for bridge in resolve_agent_sync_request(
-            config, (), tuple(config.ai_agent_paths) if profile_name is None else (), profile_name
+            configured, (), tuple(config.ai_agent_paths) if profile_name is None else (), profile_name,
+            lane_overrides=getattr(args, "lane_overrides", None),
         )[1]
     ))
     if "all" not in request.repo_selectors:
@@ -816,9 +820,11 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         skip_clone_bridges=frozenset(repo_preflight.skip_clone_bridges),
         skip_pull_bridges=frozenset(repo_preflight.skip_pull_bridges),
     )
-    agent_only = bool(sync_agents and agent_profiles and config.profile_sets
-                      and not any(name in config.ai_skill_paths for profile in config.profile_sets
-                                  for name in profile.destinations))
+    agent_only = bool(sync_agents and agent_profiles and (
+        (config.profile_sets and not any(name in config.ai_skill_paths for profile in config.profile_sets
+                                        for name in profile.destinations))
+        or (not config.profile_sets and not config.ai_skill_paths)
+    ))
     if agent_only:
         plan = SyncPlan(dry_run=dry_run, adopt=adopt, destinations=(), selected_discoveries=(),
                         notices=(*repo_preflight.notices, *materialization.notices),
@@ -852,12 +858,28 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     agent_adopt = args.adopt or args.overwrite_local_copies
     agent_plans = tuple(
         build_agent_sync_plan(
-            config, (), tuple(config.ai_agent_paths) if profile_name is None else (),
+            configured, (), tuple(config.ai_agent_paths) if profile_name is None else (),
             dry_run=dry_run, adopt=agent_adopt,
             backup_root=backup_root if agent_adopt else None, profile_name=profile_name,
+            lane_overrides=getattr(args, "lane_overrides", None),
         )
         for profile_name in agent_profiles
     )
+    # A skill link may turn a currently nonexistent agent parent into a path
+    # inside the skill source. Compare both the future entry and its current
+    # resolved target, so already-projected links and aliased parents are safe.
+    projected_skills = tuple(action for action in plan.actions
+                             if action.action in {"link", "adopt", "skip"})
+    for agent_plan in agent_plans:
+        for agent_action in agent_plan.actions:
+            root = agent_action.path.parent.resolve(strict=False)
+            for skill_action in projected_skills:
+                path = skill_action.status.path
+                future_entry = path.parent.resolve(strict=False) / path.name
+                if root.is_relative_to(future_entry) or root.is_relative_to(path.resolve(strict=False)):
+                    print(f"ERROR agent destination {root} overlaps projected skill {path}", file=stderr)
+                    _print_sync_summary(plan, "blocked", stdout)
+                    return 1
     _print_sync_plan(plan, stdout, verbosity=args.verbose)
     for agent_plan in agent_plans:
         for notice in agent_plan.notices:
@@ -1089,7 +1111,7 @@ def _sync_denylist(
     config: Config, args: argparse.Namespace
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     names: list[str] = [*args.exclude_skill]
-    if args.adopt:
+    if args.adopt or args.overwrite_local_copies:
         names.extend(config.sync.migration_denylist)
     errors: list[str] = []
     for path in args.denylist:

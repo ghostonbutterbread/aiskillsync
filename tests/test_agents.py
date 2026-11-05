@@ -159,10 +159,14 @@ class AgentSyncTests(unittest.TestCase):
         stale = self.destination / "stale.md"
         stale.symlink_to(self.agents / "gone.md")
         self.write_config()
-        before = {p: p.lstat() for p in self.base.rglob("*")}
+        # Directory traversal and discovery may update atime without writing.
+        def snapshot():
+            return {p: (s.st_mode, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                    for p in self.base.rglob("*") for s in (p.lstat(),)}
+        before = snapshot()
         result = self.cli("agents", "--dest", "claude", "--agent", "reviewer", "--adopt", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual({p: p.lstat() for p in self.base.rglob("*")}, before)
+        self.assertEqual(snapshot(), before)
         applied = self.cli("agents", "--dest", "claude", "--agent", "reviewer", "--adopt")
         self.assertEqual(applied.returncode, 0, applied.stderr + applied.stdout)
         self.assertEqual((self.destination / "reviewer.md").resolve(), source)
@@ -211,6 +215,160 @@ class AgentSyncTests(unittest.TestCase):
         again = self.cli("sync", "all", "--dry-run")
         self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
         self.assertIn("SKIP agent", again.stdout)
+
+    def test_sync_all_rejects_agent_root_under_projected_skill(self):
+        self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        skills_dest = self.base / "dest"
+        self.raw["ai_skill_paths"]["claude"] = str(skills_dest)
+        self.raw["ai_agent_paths"]["claude"] = str(skills_dest / "safe" / "agents")
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        for args in (("--dry-run",), (), ()):
+            result = self.cli("sync", "all", *args)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("agent destination", result.stdout + result.stderr)
+            self.assertFalse((skill / "agents").exists())
+            self.assertFalse((skills_dest / "safe").exists())
+
+    def test_sync_all_rejects_existing_skill_symlink_and_aliased_agent_root(self):
+        self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        root = self.base / "dest"
+        root.mkdir()
+        (root / "safe").symlink_to(skill, target_is_directory=True)
+        alias = self.base / "alias"
+        alias.symlink_to(root, target_is_directory=True)
+        self.raw["ai_skill_paths"]["claude"] = str(root)
+        self.raw["ai_agent_paths"]["claude"] = str(alias / "safe" / "agents")
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("agent destination", result.stdout + result.stderr)
+        self.assertFalse((skill / "agents").exists())
+        self.assertTrue((root / "safe").is_symlink())
+
+    def test_agent_plan_respects_explicit_lane_override(self):
+        self.agent()
+        other = self.base / "beta"
+        (other / "agents").mkdir(parents=True)
+        beta_agent = other / "agents" / "reviewer.md"
+        beta_agent.write_text("---\nname: reviewer\ndescription: Beta\n---\n")
+        self.raw["bridges"].append({"name": "beta", "path": str(other), "agents_path": "agents"})
+        self.raw["lanes"] = {"group": {"default": "stable", "variants": {"stable": "bbh", "beta": "beta"}}}
+        config = config_from_mapping(self.raw, self.config)
+        plan = build_agent_sync_plan(config, (), ("claude",), dry_run=False,
+                                     lane_overrides={"group": "beta"})
+        self.assertFalse(plan.has_blockers, plan.errors)
+        self.assertEqual(plan.actions[0].agent.path, beta_agent)
+
+    def test_sync_all_honors_lane_override_for_skill_and_agent_plans(self):
+        from contextlib import redirect_stdout, redirect_stderr
+        from io import StringIO
+        from unittest.mock import patch
+        from aiskillsync.cli import build_parser, cmd_sync
+
+        self.agent()
+        other = self.base / "beta"
+        (other / "agents").mkdir(parents=True)
+        beta_agent = other / "agents" / "reviewer.md"
+        beta_agent.write_text("---\nname: reviewer\ndescription: Beta\n---\n")
+        for root in (self.source, other):
+            skill = root / "skills" / "safe"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("safe")
+        self.raw["bridges"].append({"name": "beta", "path": str(other), "agents_path": "agents"})
+        self.raw["lanes"] = {"group": {"default": "stable", "variants": {"stable": "bbh", "beta": "beta"}}}
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        args = build_parser().parse_args(["--config", str(self.config), "sync", "all"])
+        args.lane_overrides = {"group": "beta"}
+        out, err = StringIO(), StringIO()
+        with patch.dict(os.environ, {"HOME": str(self.base / "home")}):
+            with redirect_stdout(out), redirect_stderr(err):
+                result = cmd_sync(args, out, err)
+        self.assertEqual(result, 0, err.getvalue() + out.getvalue())
+        self.assertEqual((self.destination / "reviewer.md").resolve(), beta_agent)
+        self.assertEqual((self.base / "claude" / "skills" / "safe").resolve(), other / "skills" / "safe")
+
+    def test_sync_all_allows_nested_agent_root_outside_skill_action(self):
+        agent = self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        root = self.base / "dest"
+        self.raw["ai_skill_paths"]["claude"] = str(root)
+        self.raw["ai_agent_paths"]["claude"] = str(root / "unrelated" / "agents")
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((root / "unrelated" / "agents" / "reviewer.md").resolve(), agent)
+
+    def test_sync_all_legacy_agent_only_without_skill_destinations(self):
+        source = self.agent()
+        self.raw.pop("ai_skill_paths")
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("sync", "all")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((self.destination / "reviewer.md").resolve(), source)
+
+    def test_sync_all_skill_filters_never_sync_agents(self):
+        self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        denylist = self.base / "denylist"
+        denylist.write_text("safe\n")
+        for args in (("--skill", "safe"), ("--exclude-skill", "safe"), ("--denylist", str(denylist))):
+            with self.subTest(args=args):
+                result = self.cli("sync", "all", *args)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertFalse(self.destination.exists())
+
+    def test_sync_all_configured_migration_denylist_suppresses_agents(self):
+        self.agent()
+        skill = self.source / "skills" / "safe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("safe")
+        self.raw["sync"].update(default_destinations=["claude"], migration_denylist=["safe"])
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        for option in ("--adopt", "--overwrite"):
+            with self.subTest(option=option):
+                result = self.cli("sync", "all", option)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertFalse(self.destination.exists())
+
+    def test_switch_does_not_touch_agents_even_when_local_or_missing(self):
+        self.agent()
+        other = self.base / "beta"
+        (other / "agents").mkdir(parents=True)
+        (other / "agents" / "reviewer.md").write_text("---\nname: reviewer\ndescription: Beta\n---\n")
+        for root in (self.source, other):
+            skill = root / "skills" / "safe"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("safe")
+        self.raw["bridges"].append({"name": "beta", "path": str(other), "agents_path": "agents"})
+        self.raw["lanes"] = {"group": {"default": "stable", "variants": {"stable": "bbh", "beta": "beta"}}}
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+        result = self.cli("switch", "beta")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(self.destination.exists())
+        self.destination.mkdir(parents=True)
+        local = self.destination / "reviewer.md"
+        local.write_text("local agent")
+        result = self.cli("switch", "stable")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(local.is_symlink())
+        self.assertEqual(local.read_text(), "local agent")
 
     def test_sync_all_supports_agent_only_profile(self):
         source = self.agent()
