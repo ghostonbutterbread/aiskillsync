@@ -192,6 +192,13 @@ def build_agent_sync_plan(
     actions: list[AgentAction] = []
     for destination in destination_names:
         root = config.ai_agent_paths[destination]
+        resolved_root = canonical_path(root)
+        overlapping = next((bridge for bridge in config.bridges
+                            if resolved_root.is_relative_to(canonical_path(bridge.path))
+                            or canonical_path(bridge.path).is_relative_to(resolved_root)), None)
+        if overlapping is not None:
+            errors.append(f"agent destination {destination}: root overlaps source checkout {overlapping.name}: {root}")
+            continue
         conflict = destination_root_conflict(root)
         if conflict:
             errors.append(f"destination {destination}: {conflict}")

@@ -289,6 +289,25 @@ class AgentSyncTests(unittest.TestCase):
         self.assertEqual(backups[0].read_text(), "preserve local")
         self.assertIn(str(backups[0].parents[1]), result.stdout)
 
+    def test_agent_sync_rejects_agent_destinations_inside_source_checkout(self):
+        agent = self.agent()
+        alias = self.base / "source-alias"
+        alias.symlink_to(self.source, target_is_directory=True)
+        self.raw["sync"]["default_destinations"] = ["claude"]
+        for agent_root in (self.agents, alias / "agents", self.source / "new-agent-root"):
+            with self.subTest(agent_root=agent_root):
+                self.raw["ai_agent_paths"]["claude"] = str(agent_root)
+                self.config.write_text(config_to_text(config_from_mapping(self.raw, self.config)))
+                for args in (("agents", "--dest", "claude", "--adopt", "--dry-run"),
+                             ("agents", "--dest", "claude", "--adopt"),
+                             ("sync", "all", "--adopt", "--dry-run"),
+                             ("sync", "all", "--adopt")):
+                    result = self.cli(*args)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue(agent.is_file())
+                    self.assertFalse(agent.is_symlink())
+                    self.assertIn("Review safely.", agent.read_text())
+
     def test_agent_plan_respects_explicit_lane_override(self):
         self.agent()
         other = self.base / "beta"
