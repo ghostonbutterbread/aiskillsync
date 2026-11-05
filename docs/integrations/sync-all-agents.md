@@ -1,6 +1,6 @@
 # Sync all agent definitions integration dossier
 
-- **Status:** combined feature; source-chain fixes await independent review
+- **Status:** accepted for beta as a partial provider feature; Hoster activation and full harness/model support remain open
 - **Owner:** Hermes, task t_05035b5e
 - **Branch / worktree:** `feat/sync-all-agents`, `/home/ryushe/worktrees/aiskillsync-sync-all-agents`
 - **Base / intended target:** `0fe1071a091e2417bfb31dbaaccbe5cb39763f91`, `beta` (`origin/beta` fetched at that SHA)
@@ -26,8 +26,8 @@ Combined planning blocks an agent destination below a skill link projected by th
 
 ## Blockers, risks, and next review
 
-Review of `c224b88` found a directory-symlink-chain case; combined checkpoint c78692915d5a0af7a39ebc52660b651afbe90ba3 resolves it and independently verified 178 tests. A subsequent combined review found the same dependency through a skill source; that was reproduced red and fixed by tracing lexical paths of discoverable skill sources before agent adoption. Parent ran 64 focused tests and 179 full-suite tests; the new correction still needs independent review. Do not claim the branch review-approved.
+Review of `c224b88` found a directory-symlink-chain case; combined checkpoint c78692915d5a0af7a39ebc52660b651afbe90ba3 resolves it and independently verified 178 tests. A subsequent combined review found the same dependency through a skill source; fixed at 96f3bb5ed616070a6325a0aa1edb8321259e235f and independently re-reviewed: original reproducer now blocks while preserving source and destination, 64 focused tests pass, plus relative directory/file and categorized probes. Combined review independently ran 178 tests before this fix; parent ran 179 after it. Decision: accept the reviewed scoped provider change for beta only, with explicit unsupported harness, dynamic-model, native-refresh, and Hoster-activation limitations below.
 
-Fresh independent review must inspect this branch tip against `origin/beta`, rerun the full suite, check overlap detection (planned and pre-existing links, aliases, nested safe paths, and any cross-profile actions), skill filters, agent-only behavior, lane override and switch rollback, and review the dossier against actual receipts. Confirm beta has not advanced and reconcile if necessary before integration. No fresh post-fix independent review is claimed.
+Before integration, re-fetch `origin/beta`, ensure it has not advanced, and run the full suite from the integrated tree. No review has verified full Hoster or multi-harness behavior; the accepted scope is only the provider feature and documented adapters.
 
 The combined apply is not transactional: repository refresh can precede a blocked plan, and I/O failure or concurrent filesystem changes between planning and application can leave partial writes. The overlap guard addresses projected skill actions in the combined plan, not arbitrary concurrent symlink replacement or unrelated standalone operations. Native consumer compatibility, Bunny dynamic model routing, and Hoster inventory/conflict-safe activation remain unverified; they require a separate authorized runtime gate. No stable promotion is implied. Remove this temporary dossier from beta at accepted integration.
