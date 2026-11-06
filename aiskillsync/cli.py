@@ -1558,6 +1558,21 @@ def _validate_config_edit(path: Path, text: str, expected: dict) -> None:
 
 
 def _add_bridge_entry_text(text: str, bridge: BridgeConfig, path_literal: str) -> str:
+    lines = text.splitlines(keepends=True)
+    block = _find_top_level_block(lines, "bridges")
+    # Diagnose the original, validated config, not a generated candidate.
+    if block is not None:
+        for line in lines[block.start + 1:]:
+            logical = _logical_line(line)
+            if logical is None:
+                continue
+            if logical[0] == 0 and logical[1].startswith("- "):
+                raise ConfigError(
+                    f"cannot edit indentless bridges sequence near line {block.start + 1}; "
+                    "indent the sequence and its contents under bridges, or edit the config manually"
+                )
+            break
+
     text = _ensure_repo_dir_text(text)
     lines = text.splitlines(keepends=True)
     newline = _preferred_newline(text)

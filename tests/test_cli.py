@@ -466,6 +466,55 @@ sync:
             self.assertIn("# describes second", text)
             self.assertEqual(load_config(config).bridges[0].name, "second")
 
+    def test_repo_add_reports_unsupported_indentless_bridges_without_touching_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = (b"# header\r\nrepo_dir: /synthetic/repos\r\nbridges: # section\r\n"
+                        b"# first entry\r\n- name: first\r\n  path: /synthetic/first\r\n"
+                        b"custom: retained\r\n")
+            config.write_bytes(original)
+            result = self.run_cli("--config", str(config), "repo", "add", "/synthetic/new", "--name", "new")
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("indentless", result.stderr)
+            self.assertIn("bridges sequence near line 3", result.stderr)
+            self.assertIn("indent", result.stderr)
+            self.assertIn("manually", result.stderr)
+            self.assertNotIn("could not parse config near line", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(config.read_bytes(), original)
+
+    def test_repo_add_indentless_diagnostic_line_uses_original_without_repo_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = b"# header\nbridges:\n- name: first\n  path: /synthetic/first\n"
+            config.write_bytes(original)
+            result = self.run_cli("--config", str(config), "repo", "add", "/synthetic/new", "--name", "new")
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("indentless bridges sequence near line 2", result.stderr)
+            self.assertEqual(config.read_bytes(), original)
+
+    def test_repo_add_with_unrelated_indentless_list_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = ("custom:\n- preserved\nbridges:\n  - name: first\n"
+                        "    path: /synthetic/first\n")
+            config.write_text(original, encoding="utf-8")
+            result = self.run_cli("--config", str(config), "repo", "add", "/synthetic/new", "--name", "new")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(parse_simple_yaml(config.read_text(encoding="utf-8"))["custom"], ["preserved"])
+            self.assertEqual([bridge.name for bridge in load_config(config).bridges], ["first", "new"])
+
+    def test_repo_add_malformed_config_does_not_report_indentless_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = b"bridges:\n- name: first\n  path: /synthetic/first\nbroken line\n"
+            config.write_bytes(original)
+            result = self.run_cli("--config", str(config), "repo", "add", "/synthetic/new", "--name", "new")
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("expected key/value mapping", result.stderr)
+            self.assertNotIn("indentless", result.stderr)
+            self.assertEqual(config.read_bytes(), original)
+
     def test_repo_remove_rejects_wrong_indentless_span_without_touching_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.yaml"
