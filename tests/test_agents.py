@@ -244,7 +244,7 @@ agent_overlays:
         with self.assertRaises(ConfigError):
             config_from_mapping(self.raw, self.config)
 
-    def test_omp_unmodified_source_change_and_local_edits_are_preserved_as_conflicts(self):
+    def test_omp_refresh_and_local_edits_conflict_without_adoption(self):
         source = self.agent()
         self.raw['agent_formats'] = {'claude': 'omp'}
         self.raw['agent_overlays'] = {'claude': {'reviewer': {'instructions': 'Do not delegate.'}}}
@@ -255,21 +255,17 @@ agent_overlays:
         source.write_text(source.read_text() + 'Updated canonical body.\n')
         changed = build_agent_sync_plan(config, ('bbh',), ('claude',), dry_run=False, adopt=True,
                                         backup_root=self.base / 'backup')
-        self.assertTrue(changed.has_blockers)
-        self.assertEqual(changed.actions[0].action, 'conflict')
-        self.assertIn('manual retirement', ' '.join(changed.errors))
-        with self.assertRaises(ValueError):
-            apply_agent_sync_plan(changed)
-        self.assertEqual(target.read_bytes(), previous)
+        self.assertFalse(changed.has_blockers, changed.errors)
+        self.assertEqual(changed.actions[0].action, 'refresh')
+        apply_agent_sync_plan(changed)
+        self.assertEqual((self.base / 'backup/agents/claude/reviewer.md').read_bytes(), previous)
         target.write_text(target.read_text() + 'Local edit.\n')
         edited = target.read_bytes()
-        conflict = build_agent_sync_plan(config, ('bbh',), ('claude',), dry_run=False, adopt=True,
-                                         backup_root=self.base / 'backup')
+        conflict = build_agent_sync_plan(config, ('bbh',), ('claude',), dry_run=False)
         self.assertTrue(conflict.has_blockers)
         with self.assertRaises(ValueError):
             apply_agent_sync_plan(conflict)
         self.assertEqual(target.read_bytes(), edited)
-        self.assertFalse((self.base / 'backup').exists())
         saved = self.base / 'manual-backup.md'
         target.rename(saved)
         apply_agent_sync_plan(build_agent_sync_plan(config, ('bbh',), ('claude',), dry_run=False))
@@ -277,7 +273,7 @@ agent_overlays:
         self.assertIn('Updated canonical body.', target.read_text())
         self.assertIn('Do not delegate.', target.read_text())
 
-    def test_omp_legacy_symlink_is_not_adopted_over_existing_source(self):
+    def test_omp_legacy_symlink_adoption_preserves_source(self):
         source = self.agent()
         self.destination.mkdir(parents=True)
         target = self.destination / 'reviewer.md'
@@ -285,12 +281,13 @@ agent_overlays:
         self.raw['agent_formats'] = {'claude': 'omp'}
         plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ('bbh',), ('claude',),
                                      dry_run=False, adopt=True, backup_root=self.base / 'backup')
-        self.assertTrue(plan.has_blockers)
-        with self.assertRaises(ValueError):
-            apply_agent_sync_plan(plan)
-        self.assertTrue(target.is_symlink())
-        self.assertEqual(target.resolve(), source)
-        self.assertFalse((self.base / 'backup').exists())
+        self.assertFalse(plan.has_blockers, plan.errors)
+        apply_agent_sync_plan(plan)
+        self.assertFalse(target.is_symlink())
+        saved = self.base / 'backup/agents/claude/reviewer.md'
+        self.assertTrue(saved.is_symlink())
+        self.assertEqual(saved.readlink(), source)
+        self.assertIn('Review safely.', source.read_text())
 
     @unittest.skipUnless(importlib.util.find_spec("tomllib"), "tomllib requires Python 3.11+")
     def test_native_codex_projection_preserves_prompt_and_inherits_model(self):
@@ -379,18 +376,18 @@ agent_overlays:
         plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",),
                                      dry_run=False, adopt=True, backup_root=backup)
         saved = backup / "agents" / "claude" / "reviewer.md"
-        real_link = os.link
-        def race(src, dst, *args, **kwargs):
-            if Path(dst) == saved:
+        real_open = Path.open
+        def race(path, *args, **kwargs):
+            if path == saved and args and args[0] == 'xb':
                 saved.write_text("concurrent backup")
-            return real_link(src, dst, *args, **kwargs)
-        with patch("aiskillsync.agents.os.link", side_effect=race):
+            return real_open(path, *args, **kwargs)
+        with patch.object(Path, "open", race):
             with self.assertRaisesRegex(ValueError, "incomplete.*backup"):
                 apply_agent_sync_plan(plan)
         self.assertEqual(saved.read_text(), "concurrent backup")
         self.assertEqual(target.read_text(), "original")
 
-    def test_adoption_cross_filesystem_copy_is_exclusive(self):
+    def test_adoption_snapshot_does_not_require_a_hardlink(self):
         self.agent()
         self.destination.mkdir(parents=True)
         target = self.destination / "reviewer.md"
@@ -403,23 +400,6 @@ agent_overlays:
         self.assertEqual((backup / "agents" / "claude" / "reviewer.md").read_text(), "original")
         self.assertTrue(target.is_symlink())
 
-    def test_adoption_cross_filesystem_backup_collision_preserves_both(self):
-        self.agent()
-        self.destination.mkdir(parents=True)
-        target = self.destination / "reviewer.md"
-        target.write_text("original")
-        backup = self.base / "backups"
-        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",),
-                                     dry_run=False, adopt=True, backup_root=backup)
-        saved = backup / "agents" / "claude" / "reviewer.md"
-        def race(*args, **kwargs):
-            saved.write_text("concurrent backup")
-            raise OSError(errno.EXDEV, "different filesystems")
-        with patch("aiskillsync.agents.os.link", side_effect=race):
-            with self.assertRaisesRegex(ValueError, "incomplete.*backup"):
-                apply_agent_sync_plan(plan)
-        self.assertEqual(target.read_text(), "original")
-        self.assertEqual(saved.read_text(), "concurrent backup")
 
     def test_adoption_directory_backup_preserves_contents(self):
         self.agent()
@@ -448,8 +428,7 @@ agent_overlays:
         self.assertNotIn("model:", target.read_text())
         source.write_text(source.read_text() + " update")
         update = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
-        self.assertEqual(update.actions[0].action, "conflict")
-        self.assertIn("manual retirement", " ".join(update.errors))
+        self.assertEqual(update.actions[0].action, "refresh")
         target.write_text(target.read_text() + " concurrent edit")
         with self.assertRaises(ValueError):
             apply_agent_sync_plan(update)
@@ -460,15 +439,14 @@ agent_overlays:
         self.assertTrue(backup.read_text().endswith("changed concurrent edit"))
         self.assertTrue(target.read_text().endswith("changed update"))
         target.write_text(target.read_text() + " local safety rule")
-        conflict = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False, adopt=True,
-                                         backup_root=self.base / "backups")
+        conflict = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
         self.assertTrue(conflict.has_blockers)
         self.assertEqual(conflict.actions[0].action, "conflict")
         with self.assertRaises(ValueError):
             apply_agent_sync_plan(conflict)
         self.assertTrue(target.read_text().endswith("local safety rule"))
 
-    def test_native_rejects_untranslatable_source_fields_and_local_adoption(self):
+    def test_native_rejects_untranslatable_fields_and_adopts_local_definition(self):
         source = self.agent()
         source.write_text(source.read_text().replace("---\nReview", "spawns: []\n---\nReview"))
         self.raw["agent_formats"] = {"claude": "opencode"}
@@ -482,9 +460,10 @@ agent_overlays:
         target.write_text("---\nspawns: []\nautoloadSkills: [security]\n---\nlocal prompt")
         plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False, adopt=True,
                                      backup_root=self.base / "backups")
-        self.assertTrue(plan.has_blockers)
-        self.assertEqual(plan.actions[0].action, "conflict")
-        self.assertIn("autoloadSkills", target.read_text())
+        self.assertFalse(plan.has_blockers, plan.errors)
+        self.assertEqual(plan.actions[0].action, "adopt")
+        apply_agent_sync_plan(plan)
+        self.assertIn("autoloadSkills", (self.base / "backups/agents/claude/reviewer.md").read_text())
 
     def test_native_concurrent_create_is_never_overwritten(self):
         self.agent()
@@ -600,7 +579,8 @@ agent_overlays:
         with patch.object(Path, "symlink_to", side_effect=OSError("injected failure")):
             with self.assertRaisesRegex(ValueError, "adoption backups:.*backups/agents"):
                 apply_agent_sync_plan(plan)
-        self.assertEqual(target.read_text(), "local")
+        self.assertFalse(target.exists())
+        self.assertEqual((backup / 'agents/claude/reviewer.md').read_text(), 'local')
 
     def test_native_format_config_roundtrips_and_rejects_invalid(self):
         self.raw["agent_formats"] = {"claude": "opencode"}

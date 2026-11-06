@@ -859,7 +859,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     agent_plans = tuple(
         build_agent_sync_plan(
             configured, (), tuple(config.ai_agent_paths) if profile_name is None else (),
-            dry_run=dry_run, adopt=agent_adopt,
+            dry_run=dry_run, adopt=agent_adopt, native_adopt=args.adopt,
             backup_root=backup_root if agent_adopt else None, profile_name=profile_name,
             lane_overrides=getattr(args, "lane_overrides", None),
         )
@@ -928,9 +928,12 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     try:
         created_agents = []
         for agent_plan in agent_plans:
+            if any(action.action in {"adopt", "refresh"} for action in agent_plan.actions):
+                assert agent_plan.backup_root is not None
+                print(f"Agent recovery index: {agent_plan.backup_root / 'agents'}", file=stdout, flush=True)
             created_agents.extend(apply_agent_sync_plan(agent_plan))
             completed_agent_paths.extend(str(action.path) for action in agent_plan.actions if action.action != "skip")
-            if any(action.action == "adopt" for action in agent_plan.actions):
+            if any(action.action in {"adopt", "refresh"} for action in agent_plan.actions):
                 assert agent_plan.backup_root is not None
                 print(f"Agent backups written to: {agent_plan.backup_root / 'agents'}", file=stdout)
     except (OSError, ValueError) as exc:
@@ -995,6 +998,9 @@ def cmd_agents(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     if args.dry_run:
         print("Dry run only; no filesystem changes were made", file=stdout)
         return 0
+    if any(action.action in {"adopt", "refresh"} for action in plan.actions):
+        assert plan.backup_root is not None
+        print(f"Agent recovery index: {plan.backup_root / 'agents'}", file=stdout, flush=True)
     try:
         created = apply_agent_sync_plan(plan)
     except (OSError, ValueError) as exc:
@@ -1005,7 +1011,7 @@ def cmd_agents(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
                else f"Created {len(created)} agent symlink(s)")
     print(message if created
           else ("No agent projections needed" if native else "No agent symlinks needed"), file=stdout)
-    if created and any(action.action == "adopt" for action in plan.actions):
+    if created and any(action.action in {"adopt", "refresh"} for action in plan.actions):
         assert plan.backup_root is not None
         print(f"Backups written to: {plan.backup_root / 'agents'}", file=stdout)
     return 0

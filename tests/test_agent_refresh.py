@@ -1,0 +1,259 @@
+from pathlib import Path
+import os
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from aiskillsync.agents import build_agent_sync_plan, apply_agent_sync_plan
+from aiskillsync.config import config_from_mapping
+
+
+class AgentRefreshTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.source = self.root / 'src' / 'agents'
+        self.source.mkdir(parents=True)
+        self.agent = self.source / 'reviewer.md'
+        self.agent.write_text('---\nname: reviewer\ndescription: Review\n---\nOriginal.\n')
+        self.dest = self.root / 'dest'
+        self.backup = self.root / 'backup'
+        self.raw = {'bridges': [{'name': 'src', 'path': str(self.source.parent), 'agents_path': 'agents'}],
+                    'ai_agent_paths': {'test': str(self.dest)},
+                    'sync': {'pull_before_sync': False, 'clone_if_missing': False}}
+
+    def plan(self, adopt=False):
+        return build_agent_sync_plan(config_from_mapping(self.raw, self.root / 'config'), ('src',), ('test',),
+                                     dry_run=False, adopt=adopt, backup_root=self.backup)
+
+    def test_native_refresh_preserves_previous_bytes(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        apply_agent_sync_plan(self.plan())
+        target = self.dest / 'reviewer.md'
+        old = target.read_bytes()
+        self.agent.write_text(self.agent.read_text() + 'Updated.\n')
+        plan = self.plan()
+        self.assertFalse(plan.has_blockers, plan.errors)
+        self.assertEqual(plan.actions[0].action, 'refresh')
+        apply_agent_sync_plan(plan)
+        self.assertEqual((self.backup / 'agents' / 'test' / 'reviewer.md').read_bytes(), old)
+        self.assertIn('Updated.', target.read_text())
+
+    def test_omp_overlay_change_refreshes(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.raw['agent_overlays'] = {'test': {'reviewer': {'instructions': 'old instruction'}}}
+        apply_agent_sync_plan(self.plan())
+        target = self.dest / 'reviewer.md'
+        previous = target.read_bytes()
+        self.raw['agent_overlays']['test']['reviewer']['instructions'] = 'new instruction'
+        apply_agent_sync_plan(self.plan())
+        self.assertEqual((self.backup / 'agents/test/reviewer.md').read_bytes(), previous)
+        self.assertIn('new instruction', target.read_text())
+
+    def test_failure_after_publication_retains_incomplete_receipt(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.write_text('local')
+        with patch('aiskillsync.agents.os.replace', side_effect=OSError('receipt failure')):
+            with self.assertRaisesRegex(ValueError, 'incomplete.*reviewer.md.*receipt failure'):
+                apply_agent_sync_plan(self.plan(adopt=True))
+        self.assertIn('Review', target.read_text())
+        snapshot = self.backup / 'agents/test/reviewer.md'
+        receipt = Path(json.loads((snapshot.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data['status'], 'incomplete')
+        self.assertEqual(snapshot.read_text(), 'local')
+        self.assertEqual(Path(data['displaced']).read_text(), 'local')
+
+    def test_adoption_does_not_delete_replacement_at_move(self):
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.write_text('original')
+        plan = self.plan(adopt=True)
+        real_rename = os.rename
+        def race(src, dst, *args, **kwargs):
+            if Path(src) == target:
+                replacement = self.root / 'replacement'
+                replacement.write_text('independent')
+                os.replace(replacement, target)
+            return real_rename(src, dst, *args, **kwargs)
+        with patch('aiskillsync.agents.os.rename', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                apply_agent_sync_plan(plan)
+        self.assertEqual((self.backup / 'agents' / 'test' / 'reviewer.md').read_text(), 'original')
+        displaced = list(self.root.glob('.aiskillsync-agent-backup-*/displaced'))
+        self.assertEqual(len(displaced), 1)
+        self.assertEqual(displaced[0].read_text(), 'independent')
+        self.assertFalse(target.exists())
+
+    def test_late_open_descriptor_write_keeps_both_versions(self):
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.write_bytes(b'original\n')
+        fd = os.open(target, os.O_WRONLY)
+        self.addCleanup(os.close, fd)
+        apply_agent_sync_plan(self.plan(adopt=True))
+        os.ftruncate(fd, 0)
+        os.write(fd, b'late edit\n')
+        saved = self.backup / 'agents/test/reviewer.md'
+        receipt = Path(json.loads((saved.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data['status'], 'complete')
+        self.assertEqual(saved.read_bytes(), b'original\n')
+        self.assertEqual(Path(data['displaced']).read_bytes(), b'late edit\n')
+        self.assertTrue(target.is_symlink())
+
+    def test_concurrent_publish_preserves_new_entry_and_incomplete_receipt(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.write_text('local')
+        plan = self.plan(adopt=True)
+        link = os.link
+        def race(src, dst, *args, **kwargs):
+            if Path(dst) == target:
+                target.write_text('independent')
+            return link(src, dst, *args, **kwargs)
+        with patch('aiskillsync.agents.os.link', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete.*backup'):
+                apply_agent_sync_plan(plan)
+        self.assertEqual(target.read_text(), 'independent')
+        snapshot = self.backup / 'agents/test/reviewer.md'
+        receipt = Path(json.loads((snapshot.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data['status'], 'incomplete')
+        self.assertEqual(snapshot.read_text(), 'local')
+        self.assertEqual(Path(data['displaced']).read_text(), 'local')
+
+    def test_abrupt_exit_after_move_leaves_receipt_and_both_backups(self):
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.write_text('original')
+        script = '''
+import os, sys
+from pathlib import Path
+from aiskillsync.agents import build_agent_sync_plan, apply_agent_sync_plan
+from aiskillsync.config import config_from_mapping
+root=Path(sys.argv[1]); src=root/'src'; dest=root/'dest'
+raw={'bridges':[{'name':'src','path':str(src),'agents_path':'agents'}], 'ai_agent_paths':{'test':str(dest)}, 'sync':{'pull_before_sync':False,'clone_if_missing':False}}
+plan=build_agent_sync_plan(config_from_mapping(raw,root/'config'),('src',),('test',),dry_run=False,adopt=True,backup_root=root/'backup')
+rename=os.rename
+def die(a,b):
+    rename(a,b); os._exit(41)
+os.rename=die
+apply_agent_sync_plan(plan)
+'''
+        proc = subprocess.run([sys.executable, '-c', script, str(self.root)], env=os.environ.copy())
+        self.assertEqual(proc.returncode, 41)
+        snapshot = self.backup / 'agents/test/reviewer.md'
+        receipt = Path(json.loads((snapshot.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data['status'], 'incomplete')
+        self.assertEqual(snapshot.read_text(), 'original')
+        self.assertEqual(Path(data['displaced']).read_text(), 'original')
+        self.assertFalse(target.exists())
+
+    def test_all_native_providers_refresh_and_explicitly_adopt_edits(self):
+        for provider in ('omp', 'opencode', 'codex'):
+            with self.subTest(provider=provider):
+                self.dest = self.root / provider
+                self.backup = self.root / ('backup-' + provider)
+                self.raw['ai_agent_paths']['test'] = str(self.dest)
+                self.raw['agent_formats'] = {'test': provider}
+                apply_agent_sync_plan(self.plan())
+                target = self.dest / ('reviewer.toml' if provider == 'codex' else 'reviewer.md')
+                target.write_text(target.read_text() + 'local edit\n')
+                edited = target.read_bytes()
+                self.assertTrue(self.plan().has_blockers)
+                apply_agent_sync_plan(self.plan(adopt=True))
+                self.assertEqual((self.backup / 'agents/test' / target.name).read_bytes(), edited)
+                self.assertNotIn('local edit', target.read_text())
+                self.backup = self.root / ('refresh-' + provider)
+                self.agent.write_text(self.agent.read_text() + provider + '\n')
+                before = target.read_bytes()
+                apply_agent_sync_plan(self.plan())
+                self.assertEqual((self.backup / 'agents/test' / target.name).read_bytes(), before)
+                self.assertIn(provider, target.read_text())
+
+    def test_cli_agents_and_sync_all_refresh_and_explicit_adopt(self):
+        from aiskillsync.config import config_to_text
+        self.raw['agent_formats'] = {'test': 'omp'}
+        config_path = self.root / 'config.yaml'
+        config_path.write_text(config_to_text(config_from_mapping(self.raw, config_path)))
+        home = self.root / 'home'
+        home.mkdir()
+        env = {**os.environ, 'HOME': str(home)}
+        def run(*args):
+            return subprocess.run([sys.executable, '-m', 'aiskillsync', '--config', str(config_path), *args],
+                                  env=env, text=True, capture_output=True)
+        first = run('agents', '--dest', 'test')
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        target = self.dest / 'reviewer.md'
+        old = target.read_bytes()
+        self.agent.write_text(self.agent.read_text() + 'next source\n')
+        preview = run('sync', 'all', '--dry-run')
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertIn('REFRESH agent', preview.stdout)
+        self.assertEqual(target.read_bytes(), old)
+        applied = run('sync', 'all')
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertIn('Agent recovery index:', applied.stdout)
+        self.assertIn('next source', target.read_text())
+        target.write_text(target.read_text() + 'local rules\n')
+        edited = target.read_bytes()
+        denied = run('sync', 'all', '--overwrite')
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertEqual(target.read_bytes(), edited)
+        adopted = run('agents', '--dest', 'test', '--adopt')
+        self.assertEqual(adopted.returncode, 0, adopted.stdout + adopted.stderr)
+        self.assertIn('Agent recovery index:', adopted.stdout)
+        snapshots = list((home / '.cache/aiskillsync-migration').glob('*/agents/test/reviewer.md'))
+        self.assertEqual(len(snapshots), 2)
+        self.assertIn(old, [p.read_bytes() for p in snapshots])
+        self.assertIn(edited, [p.read_bytes() for p in snapshots])
+
+    def test_sync_all_adopts_two_local_omp_files_and_two_legacy_links(self):
+        from aiskillsync.config import config_to_text
+        self.agent.unlink()
+        self.dest.mkdir()
+        self.raw['agent_formats'] = {'test': 'omp'}
+        originals = {}
+        for name in ('alpha', 'bravo', 'charlie', 'delta'):
+            source = self.source / (name + '.md')
+            source.write_text(f'---\nname: {name}\ndescription: {name} role\n---\ncanonical {name}\n')
+            target = self.dest / (name + '.md')
+            if name in ('alpha', 'bravo'):
+                content = f'---\ntools: []\n---\nlocal {name}\n'
+                target.write_text(content)
+                originals[name] = content
+            else:
+                target.symlink_to(source)
+                originals[name] = source
+        config_path = self.root / 'config.yaml'
+        config_path.write_text(config_to_text(config_from_mapping(self.raw, config_path)))
+        home = self.root / 'home'
+        home.mkdir()
+        env = {**os.environ, 'HOME': str(home)}
+        run = lambda *args: subprocess.run([sys.executable, '-m', 'aiskillsync', '--config', str(config_path),
+                                            'sync', 'all', *args], env=env, text=True, capture_output=True)
+        self.assertNotEqual(run().returncode, 0)
+        result = run('--adopt')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        roots = list((home / '.cache/aiskillsync-migration').glob('*/agents/test'))
+        self.assertEqual(len(roots), 1)
+        for name, original in originals.items():
+            saved, target = roots[0] / (name + '.md'), self.dest / (name + '.md')
+            self.assertIn('canonical ' + name, target.read_text())
+            if isinstance(original, Path):
+                self.assertTrue(saved.is_symlink())
+                self.assertEqual(saved.readlink(), original)
+            else:
+                self.assertEqual(saved.read_text(), original)
+        again = run()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn('No agent projections needed', again.stdout)

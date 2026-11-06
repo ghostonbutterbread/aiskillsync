@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-import errno
 import hashlib
 import json
 import os
@@ -16,7 +15,7 @@ from typing import Any
 
 from .config import BridgeConfig, Config, ConfigError, _strip_inline_comment, canonical_path, parse_simple_yaml
 from .lanes import effective_config
-from .sync import configured_branch_error, destination_root_conflict, select_bridge_configs
+from .sync import configured_branch_error, destination_root_conflict, select_bridge_configs, make_backup_root
 
 
 @dataclass(frozen=True)
@@ -36,6 +35,7 @@ class AgentAction:
     expected_state: tuple[object, ...]
     content: str | None = None
     source_digest: str | None = None
+    previous_bytes: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -256,6 +256,7 @@ def build_agent_sync_plan(
     *,
     dry_run: bool,
     adopt: bool = False,
+    native_adopt: bool | None = None,
     backup_root: Path | None = None,
     profile_name: str | None = None,
     include_agents: tuple[str, ...] = (),
@@ -360,12 +361,12 @@ def build_agent_sync_plan(
                             expected_name = f"{owner.name}.{'toml' if provider == 'codex' else 'md'}" if owner else None
                             if owner is None or provider is None or marker_format != provider or expected_name != entry.name:
                                 errors.append(f"stale or invalid managed agent {entry}: source missing, malformed, renamed, or outside selected sources; preserve and reconcile manually")
-                            else:
+                            elif owner not in agents:
                                 try:
                                     overlay = config.agent_overlays.get(destination, {}).get(owner.name)
                                     expected_content, _ = _native_content(owner, provider, overlay)
                                     if _owned_native(entry, owner, provider) != expected_content:
-                                        errors.append(f"stale or edited managed agent {entry}: manual retirement or reconciliation required; stop the consumer and preserve a backup outside its discovery root")
+                                        errors.append(f"stale or edited unselected managed agent {entry}: reconcile manually or select it")
                                 except (OSError, UnicodeError, ValueError) as exc:
                                     errors.append(f"invalid managed agent source for {entry}: {exc}")
                     except OSError as exc:
@@ -373,8 +374,10 @@ def build_agent_sync_plan(
                 elif entry.is_symlink():
                     target = canonical_path(entry)
                     expected = {canonical_path(agent.path): f"{agent.name}.md" for agent in discovered}
+                    selected = {canonical_path(agent.path) for agent in agents}
                     if any(bridge.agents_dir is not None and canonical_path(bridge.agents_dir) in target.parents
-                           for bridge in bridges) and (provider is not None or expected.get(target) != entry.name):
+                           for bridge in bridges) and (expected.get(target) != entry.name or provider == "codex"
+                                                       or (provider is not None and target not in selected)):
                         errors.append(f"stale or invalid managed agent link {entry}: source missing or malformed; preserve and reconcile manually")
         for agent in agents:
             provider = config.agent_formats.get(destination)
@@ -402,21 +405,26 @@ def build_agent_sync_plan(
                         if owned == content:
                             action = "skip"
                         else:
-                            action = "conflict"
-                            errors.append(f"native update requires manual retirement of {path}: stop the consumer, move the file outside its discovery root to a safe backup, then re-run sync; restore the backup if needed")
+                            action = "refresh"
                     else:
-                        # A backup does not reconcile local safety or prompt.
-                        action = "conflict"
+                        action = "adopt" if (adopt if native_adopt is None else native_adopt) else "conflict"
             elif path.is_symlink() and canonical_path(path) == canonical_path(agent.path):
                 action = "skip"
             elif not path.exists() and not path.is_symlink():
                 action = "link"
             else:
                 action = "adopt" if adopt else "conflict"
+            try:
+                previous_bytes = path.read_bytes() if action in {"refresh", "adopt"} and path.is_file() and not path.is_symlink() else None
+            except OSError as exc:
+                errors.append(f"cannot snapshot agent destination during planning: {path}: {exc}")
+                continue
             if expected_state != _entry_state(path):
                 errors.append(f"agent destination changed during planning: {path}")
                 continue
-            actions.append(AgentAction(destination, path, agent, action, expected_state, content, source_digest))
+            actions.append(AgentAction(destination, path, agent, action, expected_state, content, source_digest, previous_bytes))
+    if backup_root is None and any(action.action in {"refresh", "adopt"} for action in actions):
+        backup_root = make_backup_root()
     return AgentSyncPlan(dry_run, tuple(actions), tuple(notices), tuple(errors), backup_root)
 
 
@@ -429,29 +437,49 @@ def _entry_state(path: Path) -> tuple[object, ...]:
             str(path.readlink()) if path.is_symlink() else None)
 
 
-def _move_no_clobber(source: Path, destination: Path) -> None:
-    """Move an adopted entry without replacing an independently created backup."""
-    state = _entry_state(source)
-    if source.is_dir() and not source.is_symlink():
-        shutil.copytree(source, destination, symlinks=True)
-        if _entry_state(source) != state:
-            raise ValueError(f"agent destination changed during backup: {source}")
-        shutil.rmtree(source)
-        return
+def _displace(action: AgentAction, backup: Path) -> Path:
+    """Snapshot separately, then quarantine the actual entry on its filesystem.
+
+    Neither a failed identity check nor a failed publication automatically
+    restores anything: an independent entry may now occupy the pathname.
+    """
+    source = action.path
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    parent = source.parent.parent if source.parent.parent.stat().st_dev == source.parent.stat().st_dev else source.parent
     try:
-        os.link(source, destination, follow_symlinks=False)
-    except OSError as exc:
-        if exc.errno != errno.EXDEV:
+        private = Path(tempfile.mkdtemp(prefix=".aiskillsync-agent-backup-", dir=parent))
+    except PermissionError:
+        if parent == source.parent:
             raise
-        if source.is_symlink():
-            destination.symlink_to(source.readlink())
-        else:
-            with source.open("rb") as src, destination.open("xb") as dst:
-                shutil.copyfileobj(src, dst)
-            shutil.copystat(source, destination)
-    if _entry_state(source) != state:
-        raise ValueError(f"agent destination changed during backup: {source}")
-    source.unlink()
+        private = Path(tempfile.mkdtemp(prefix=".aiskillsync-agent-backup-", dir=source.parent))
+    displaced = private / "displaced"
+    receipt = private / "receipt.json"
+    receipt.write_text(json.dumps({"status": "incomplete", "target": str(source),
+                                   "snapshot": str(backup), "displaced": str(displaced)}, indent=2) + "\n")
+    with (backup.parent / (backup.name + ".receipt.json")).open("x", encoding="utf-8") as index:
+        json.dump({"receipt": str(receipt)}, index)
+    if source.is_symlink():
+        backup.symlink_to(source.readlink())
+    elif source.is_dir():
+        shutil.copytree(source, backup, symlinks=True)
+    elif source.is_file():
+        with source.open("rb") as src, backup.open("xb") as dst:
+            shutil.copyfileobj(src, dst)
+        shutil.copystat(source, backup)
+    else:
+        raise ValueError(f"unsupported agent destination type: {source}; receipt: {receipt}")
+    if _entry_state(source) != action.expected_state:
+        raise ValueError(f"agent destination changed during snapshot: {source}; receipt: {receipt}")
+    if action.previous_bytes is not None and backup.read_bytes() != action.previous_bytes:
+        raise ValueError(f"agent destination bytes changed during snapshot: {source}; receipt: {receipt}")
+    # The destination is inside a newly-created private directory on the same
+    # filesystem, so rename cannot replace another pathname entry there.
+    os.rename(source, displaced)
+    if _entry_state(displaced) != action.expected_state:
+        raise ValueError(f"agent destination changed at displacement: {source}; receipt: {receipt}")
+    if displaced.is_file() and not displaced.is_symlink() and displaced.read_bytes() != backup.read_bytes():
+        raise ValueError(f"agent destination changed during displacement: {source}; receipt: {receipt}")
+    return private
 
 
 def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
@@ -478,13 +506,14 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
             raise ValueError(f"agent source missing before apply: {action.agent.path}")
         if action.source_digest is not None and _digest(action.agent.path.read_text(encoding="utf-8")) != action.source_digest:
             raise ValueError(f"agent source changed before apply: {action.agent.path}")
-    adoptions = tuple(action for action in plan.actions if action.action == "adopt")
+    adoptions = tuple(action for action in plan.actions if action.action in {"adopt", "refresh"})
     if adoptions and plan.backup_root is None:
         raise ValueError("agent adoption requires a backup root")
     for action in adoptions:
         assert plan.backup_root is not None
         backup = plan.backup_root / "agents" / action.destination / action.path.name
-        if backup.exists() or backup.is_symlink():
+        index = backup.parent / (backup.name + ".receipt.json")
+        if backup.exists() or backup.is_symlink() or index.exists() or index.is_symlink():
             raise ValueError(f"agent backup already exists: {backup}")
     created: list[str] = []
     completed: list[Path] = []
@@ -497,14 +526,21 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
             if action.source_digest is not None and _digest(action.agent.path.read_text(encoding="utf-8")) != action.source_digest:
                 raise ValueError(f"agent source changed before apply: {action.agent.path}")
             action.path.parent.mkdir(parents=True, exist_ok=True)
+            private = None
+            backup = None
+            if action.action in {"adopt", "refresh"}:
+                assert plan.backup_root is not None
+                backup = plan.backup_root / "agents" / action.destination / action.path.name
+                private = _displace(action, backup)
             if action.content is not None:
-                if _entry_state(action.path) != action.expected_state:
+                if private is None and _entry_state(action.path) != action.expected_state:
                     raise ValueError(f"agent destination changed before apply: {action.path}")
-                fd, temp_name = tempfile.mkstemp(prefix=".aiskillsync-agent-", dir=action.path.parent)
+                temp_dir = private or Path(tempfile.mkdtemp(prefix=".aiskillsync-agent-write-", dir=action.path.parent))
+                fd, temp_name = tempfile.mkstemp(prefix="prepared-", dir=temp_dir)
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
                         handle.write(action.content)
-                    if action.action == "write":
+                    if action.action in {"write", "adopt", "refresh"}:
                         # Hard-link create refuses a concurrently created destination.
                         os.link(temp_name, action.path)
                         completed.append(action.path)
@@ -516,22 +552,19 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                 finally:
                     if os.path.exists(temp_name):
                         os.unlink(temp_name)
-                created.append(f"{action.destination}:{action.agent.name}")
-                continue
-            backup = None
-            if action.action == "adopt":
-                assert plan.backup_root is not None
-                backup = plan.backup_root / "agents" / action.destination / action.path.name
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                _move_no_clobber(action.path, backup)
-            try:
+                    if private is None:
+                        temp_dir.rmdir()
+            else:
                 action.path.symlink_to(action.agent.path)
-            except OSError:
-                if backup is not None and not (action.path.exists() or action.path.is_symlink()):
-                    _move_no_clobber(backup, action.path)
-                raise
+                completed.append(action.path)
+            if private is not None:
+                assert backup is not None
+                receipt = private / "receipt.json"
+                complete = private / "receipt-complete.json"
+                complete.write_text(json.dumps({"status": "complete", "target": str(action.path),
+                                                "snapshot": str(backup), "displaced": str(private / 'displaced')}, indent=2) + "\n")
+                os.replace(complete, receipt)
             created.append(f"{action.destination}:{action.agent.name}")
-            completed.append(action.path)
     except (OSError, ValueError) as exc:
         if completed or (adoptions and plan.backup_root):
             paths = ", ".join(str(path) for path in completed)

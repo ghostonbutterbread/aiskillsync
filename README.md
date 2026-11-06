@@ -393,9 +393,9 @@ tools, `"*"` for unrestricted spawns, and booleans for the last two fields.
 projection never pins a model. `instructions` is optional single-line text
 appended to the source body. Unknown overlays or roles not present in the
 selected source set block the plan; include the owning source when selecting
-repos. Existing raw OMP links or local files block native projection even with
-`--adopt`: inspect them, record their settings in config, stop other writers,
-and move them to a safe backup outside discovery before the initial native sync.
+repos. Before adopting existing raw OMP links or local definitions, inspect
+their settings and record the ones you need in config. Explicit `--adopt`
+preserves the old entry in backups before installing a native projection.
 
 The no-nested-worker instruction is cooperative, **not enforcement**. OMP
 18.16.0 maps `spawns: []` to undefined, so this config rejects that value; an
@@ -406,35 +406,46 @@ selection works. OMP's `thinking-level` spelling normalizes to `thinkingLevel`;
 use the latter in this config.
 
 Native projections are regular managed files, not symlinks. A source-path and
-content checksum marker identifies generated files. Existing local definitions,
-modified projections and unexpected symlinks block even with `--adopt`: a
-backup does not reconcile safety fields or distinct prompts. Destination and
-source agent roots must not overlap, including through symlinks.
+content checksum marker identifies generated files. Unmodified managed files
+refresh when their source or overlay changes; a local definition, edited
+projection, or unexpected symlink blocks unless explicitly adopted with
+`--adopt`. Adoption saves data but does **not** reconcile safety fields or
+distinct prompts: inspect the differences first. `sync all --overwrite` is not
+authorization to adopt native conflicts. Destination and source agent roots
+must not overlap, including through symlinks.
 
-Native updates are deliberately **not** automatic: a portable check followed by
-replacement could overwrite an edit made between the two operations. Stop the
-consumer and other writers, inspect the existing file and move it to an
-operator-chosen backup outside every agent discovery root, then rerun sync to
-create the replacement. To roll back, stop writers again, preserve the new file
-outside discovery, and restore the backup. A source removal, malformed source,
-rename or format change similarly blocks on identifiable stale managed files;
-review and retire them manually, rather than leaving them active silently.
+A source removal, malformed source, rename or format change blocks on
+identifiable stale managed files; review and retire them manually rather than
+leaving them active silently.
 Unmatched markers from other profiles sharing a destination also block: select
 the complete owning sources or reconcile the paths manually. Markers removed or
 destroyed by an external edit cannot be identified as managed without a manifest.
 
-New files use no-clobber creation, but a multi-file apply is not transactional.
-Source changes detected after publishing a native file fail with an incomplete
-apply receipt; the file may still be discoverable and must be reconciled manually.
-Stop all writers when adopting, including processes holding writable file
-handles: a concurrent replacement during the current raw-link adoption can be
-removed without backup. Directory backups and cross-filesystem copies are also
-not atomic and can leave partial backups on failure.
-On a caught partial failure the error lists installed paths and any adoption
-backup root: stop consumers, inspect/preserve concurrent edits, and manually
-reconcile or restore before retrying. An abrupt process or machine failure may
-not emit that receipt; inspect the full destination before restarting. Skill and
-agent application and separate profile plans are not a single transaction.
+Refresh and adoption save two independent artifacts: a byte snapshot under the
+printed recovery index (`.../agents/<destination>/<name>`) and the actual
+displaced inode in a private same-filesystem directory. The neighboring
+`<name>.receipt.json` points to that directory's receipt, which lists target,
+snapshot, displaced entry, and `incomplete` or `complete` status. The snapshot
+is immutable by convention; do not modify it. An already-open writable handle
+can still modify the displaced inode after success, and no post-return change
+detection is claimed. Preserve both artifacts when reconciling. Symlink
+snapshots preserve link text, not target contents; directory snapshots are
+non-atomic copies, while the displaced directory retains its original entries.
+Ensure your consumer does not recursively discover private backup directories:
+they are normally siblings of the agent root, but fall back to a hidden
+subdirectory of it when required by filesystem boundaries or permissions.
+
+Publication is no-clobber. A concurrently replaced entry may be quarantined,
+but is not deleted; a newly created destination blocks publication. Applies are
+not transactional. Source changes detected after publication and other caught
+failures report installed paths and the recovery index. An abrupt process exit
+can leave an incomplete receipt and absent or already-published destination;
+inspect the index and full destination before restarting. Never automatically
+overwrite a destination to restore: stop consumers, preserve every current entry,
+and manually restore the chosen backup only to a vacant pathname. No power-loss
+fsync guarantee is made. Unrelated hostile mutation of private backup directories
+is out of scope. Skill and agent application and separate profile plans are not
+a single transaction.
 Pi extensions and Hermes have no native adapter here; select no format
 only if raw linking is independently verified for that exact consumer. Codex
 standalone agent discovery requires a Codex release that supports that contract.
