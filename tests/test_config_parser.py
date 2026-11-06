@@ -7,6 +7,16 @@ from aiskillsync.config import ConfigError, config_from_mapping, config_to_text,
 
 
 class IndentlessSequenceTests(unittest.TestCase):
+    def test_roundtrip_empty_destinations_and_colon_list_items(self) -> None:
+        for raw in (
+            {"sync": {"default_destinations": []}},
+            {"sync": {"migration_denylist": ["foo:bar", "it's: valid"]}},
+        ):
+            with self.subTest(raw=raw):
+                config = config_from_mapping(raw, Path("/synthetic/config.yaml"))
+                restored = config_from_mapping(parse_simple_yaml(config_to_text(config)), config.path)
+                self.assertEqual(restored, config)
+
     def test_legacy_config_roundtrips_tabs_and_quoted_backslashes(self) -> None:
         raw = {"repo_dir": r" /opt/team\tools' ",
                "bridges": [{"name": "team\tbridge", "path": "/tmp/repo"}],

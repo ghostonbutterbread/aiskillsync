@@ -677,9 +677,12 @@ def config_to_text(config: Config) -> str:
     lines.append(f"  pull_before_sync: {str(config.sync.pull_before_sync).lower()}")
     lines.append(f"  clone_if_missing: {str(config.sync.clone_if_missing).lower()}")
     lines.append(f"  materialization_workers: {config.sync.materialization_workers}")
-    lines.append("  default_destinations:")
-    for destination in config.sync.default_destinations:
-        lines.append(f"    - {_format_scalar(destination)}")
+    if config.sync.default_destinations:
+        lines.append("  default_destinations:")
+        for destination in config.sync.default_destinations:
+            lines.append(f"    - {_format_scalar(destination)}")
+    else:
+        lines.append("  default_destinations: []")
     if config.sync.migration_denylist:
         lines.append("  migration_denylist:")
         for skill_name in config.sync.migration_denylist:
@@ -712,6 +715,7 @@ def _format_scalar(value: str | Path) -> str:
         or text[0] in "-[]{}#&*!|>'\"%@`"
         or text.lower() in {"true", "false", "null", "~"}
         or " #" in text
+        or ":" in text
     )
     if not needs_quotes:
         return text

@@ -10,7 +10,7 @@ from unittest import mock
 from pathlib import Path
 
 from aiskillsync import cli as cli_module
-from aiskillsync.config import DEFAULT_CONFIG_TEXT
+from aiskillsync.config import DEFAULT_CONFIG_TEXT, load_config, parse_simple_yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -403,6 +403,121 @@ sync:
 
         self.assertIn("aiskillsync = \"aiskillsync.cli:main\"", text)
         self.assertNotIn("migrate_aiskillsync_personal", text)
+
+    def test_repo_add_rejects_unrepresentable_path_without_touching_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = "# keep header\nbridges: [] # keep comment\ncustom: keep\n"
+            config.write_text(original, encoding="utf-8")
+            bad_path = str(Path(tmp) / "repo") + "\u2028    repo: https://example.invalid/injected.git"
+            result = self.run_cli("--config", str(config), "repo", "add", bad_path, "--name", "safe")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("aiskillsync:", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_repo_remove_rejects_dangling_profile_without_touching_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = ("# keep header\nbridges:\n  - name: one\n    path: /synthetic/one\n"
+                        "ai_skill_paths:\n  codex: /synthetic/codex\n"
+                        "profile_sets:\n  profile:\n    destination: codex\n"
+                        "    sources:\n      - bridge: one\n")
+            config.write_text(original, encoding="utf-8")
+            result = self.run_cli("--config", str(config), "repo", "remove", "one")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("aiskillsync:", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_repo_remove_last_entry_preserves_neighboring_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            config.write_text("bridges: # section\n  # before\n  - name: only\n"
+                              "    path: /synthetic/only\n\n# after\ncustom: retained\n", encoding="utf-8")
+            result = self.run_cli("--config", str(config), "repo", "remove", "only")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            text = config.read_text(encoding="utf-8")
+            for comment in ("# section", "# before", "# after"):
+                self.assertIn(comment, text)
+            self.assertEqual(parse_simple_yaml(text), {"bridges": [], "custom": "retained"})
+
+    def test_repo_add_preserves_crlf_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = b"# header\r\nrepo_dir: /synthetic/repos\r\nbridges: [] # section\r\ncustom: retained\r\n"
+            config.write_bytes(original)
+            result = self.run_cli("--config", str(config), "repo", "add", "/synthetic/new", "--name", "new")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            content = config.read_bytes()
+            self.assertNotIn(b"\n", content.replace(b"\r\n", b""))
+            self.assertIn(b"# header\r\n", content)
+            self.assertIn(b"custom: retained\r\n", content)
+            self.assertEqual(load_config(config).bridges[0].name, "new")
+
+    def test_repo_remove_preserves_comment_before_next_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            config.write_text("bridges:\n  - name: first\n    path: /synthetic/first\n"
+                              "  # describes second\n  - name: second\n    path: /synthetic/second\n", encoding="utf-8")
+            result = self.run_cli("--config", str(config), "repo", "remove", "first")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            text = config.read_text(encoding="utf-8")
+            self.assertIn("# describes second", text)
+            self.assertEqual(load_config(config).bridges[0].name, "second")
+
+    def test_repo_remove_rejects_wrong_indentless_span_without_touching_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = ("# retain\nbridges:\n- name: first\n  path: /synthetic/first\n"
+                        "  labels:\n    - preserved\n- name: second\n  path: /synthetic/second\n"
+                        "other: unchanged\n")
+            config.write_text(original, encoding="utf-8")
+            result = self.run_cli("--config", str(config), "repo", "remove", "first")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("aiskillsync:", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_repo_add_and_remove_preserve_exact_values_and_other_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = ("# header remains\nrepo_dir: /synthetic/repos\nbridges:\n"
+                        "  - name: original\n    path: /synthetic/original\n"
+                        "    custom: retained\n# footer remains\ncustom_top: untouched\n")
+            config.write_text(original, encoding="utf-8")
+            before = parse_simple_yaml(original)
+            path = str(Path(tmp) / "repo:it's")
+            result = self.run_cli("--config", str(config), "repo", "add", path, "--name", "new",
+                                  "--branch", "release:it's", "--skills-path", "tools:skills")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            added = parse_simple_yaml(config.read_text(encoding="utf-8"))
+            self.assertEqual(added["bridges"][0], before["bridges"][0])
+            self.assertEqual(added["bridges"][1], {"name": "new", "path": path,
+                "skills_path": "tools:skills", "branch": "release:it's", "enabled": True})
+            self.assertEqual(str(load_config(config).bridges[1].path), path)
+            result = self.run_cli("--config", str(config), "repo", "remove", "new")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            after = config.read_text(encoding="utf-8")
+            self.assertEqual(parse_simple_yaml(after), before)
+            self.assertIn("# header remains", after)
+            self.assertIn("# footer remains", after)
+
+    def test_external_add_rejects_unrepresentable_skill_without_touching_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            original = ("# retain\nbridges:\n  - name: base\n    path: /synthetic/base\n"
+                        "ai_skill_paths:\n  codex: /synthetic/codex\n"
+                        "profile_sets:\n  profile:\n    destination: codex\n"
+                        "    sources:\n      - bridge: base\n")
+            config.write_text(original, encoding="utf-8")
+            result = self.run_cli("--config", str(config), "external", "add",
+                "https://example.invalid/repo.git", "--name", "external", "--profile", "profile",
+                "--skill", "safe\u2028          - injected")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("aiskillsync:", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
 
     def test_repo_add_uses_repo_dir_and_sync_apply_clones_configured_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

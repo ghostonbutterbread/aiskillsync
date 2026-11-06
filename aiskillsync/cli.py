@@ -11,7 +11,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 from urllib.parse import urlparse
 
 from . import __version__
@@ -1458,7 +1458,8 @@ def _with_adhoc_repositories(
 
 def _read_config_text(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8", newline="") as handle:
+            return handle.read()
     except OSError as exc:
         raise ConfigError(f"could not read config {path}: {exc}") from exc
 
@@ -1500,23 +1501,60 @@ def _write_config_bridge_add(
     profile_names: tuple[str, ...] = (),
     selected_skill_names: tuple[str, ...] = (),
 ) -> None:
+    expected = parse_simple_yaml(original_text)
+    if _top_level_string_value(original_text, "repo_dir") is None:
+        expected["repo_dir"] = str(DEFAULT_REPO_DIR)
+    entry: dict[str, Any] = {
+        "name": bridge.name,
+        "path": path_literal,
+        "skills_path": bridge.skills_path,
+        "enabled": bridge.enabled,
+    }
+    if bridge.repo is not None:
+        entry["repo"] = bridge.repo
+    if bridge.branch is not None:
+        entry["branch"] = bridge.branch
+    if bridge.kind != "managed":
+        entry["kind"] = bridge.kind
+    expected["bridges"] = [*(expected.get("bridges") or []), entry]
+    for profile_name in profile_names:
+        source: dict[str, Any] = {"bridge": bridge.name}
+        if selected_skill_names:
+            source["include_skills"] = list(selected_skill_names)
+        expected["profile_sets"][profile_name]["sources"].append(source)
     try:
         updated = _add_bridge_entry_text(original_text, bridge, path_literal)
         for profile_name in profile_names:
             updated = _add_profile_source_entry_text(
                 updated, profile_name, bridge.name, selected_skill_names
             )
+        _validate_config_edit(path, updated, expected)
         atomic_write_text(path, updated)
     except OSError as exc:
         raise ConfigError(f"could not write config {path}: {exc}") from exc
 
 
 def _write_config_bridge_remove(path: Path, original_text: str, bridge_index: int) -> None:
+    expected = parse_simple_yaml(original_text)
+    del expected["bridges"][bridge_index]
     try:
         updated = _remove_bridge_entry_text(original_text, bridge_index)
+        _validate_config_edit(path, updated, expected)
         atomic_write_text(path, updated)
     except OSError as exc:
         raise ConfigError(f"could not write config {path}: {exc}") from exc
+
+
+def _validate_config_edit(path: Path, text: str, expected: dict) -> None:
+    """Reject edits that alter any unintended parsed value or yield invalid config."""
+    try:
+        text.encode("utf-8")
+        actual = parse_simple_yaml(text)
+        if actual != expected:
+            raise ConfigError("edit would change unintended config values")
+        config_from_mapping(actual, path)
+    except (ConfigError, UnicodeError) as exc:
+        raise ConfigError(f"config edit cannot be saved safely: {exc}") from exc
 
 
 def _add_bridge_entry_text(text: str, bridge: BridgeConfig, path_literal: str) -> str:
@@ -1655,13 +1693,13 @@ def _remove_bridge_entry_text(text: str, bridge_index: int) -> str:
     if bridge_index < 0 or bridge_index >= len(spans):
         raise ConfigError(f"could not locate bridges[{bridge_index + 1}] in config text")
 
-    if len(spans) == 1:
-        updated = [*lines[: block.start + 1], *lines[block.end :]]
-        updated[block.start] = _set_key_line_value(lines[block.start], "[]")
-        return "".join(updated)
-
     remove_start, remove_end = spans[bridge_index]
-    return "".join([*lines[:remove_start], *lines[remove_end:]])
+    while remove_end > remove_start + 1 and _is_blank_or_comment(lines[remove_end - 1]):
+        remove_end -= 1
+    updated = [*lines[:remove_start], *lines[remove_end:]]
+    if len(spans) == 1:
+        updated[block.start] = _set_key_line_value(lines[block.start], "[]")
+    return "".join(updated)
 
 
 def _find_top_level_block(lines: list[str], key: str) -> ConfigTextBlock | None:
