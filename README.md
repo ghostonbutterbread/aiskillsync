@@ -178,7 +178,11 @@ sync:
 ```
 
 The MVP parser supports the simple YAML shape above and intentionally avoids
-external Python packages.
+external Python packages. Double-quoted scalars accept the JSON-compatible escape
+subset (including `\"`, `\\`, and `\uXXXX`); unsupported escapes are rejected
+rather than passed through. Single-quoted scalars escape an apostrophe by doubling
+it. Overlay instructions and string-list items must each be a single line,
+including no Unicode line separators.
 
 When `--config` is omitted and the default config file is missing, `config`,
 `list`, `doctor`, and `sync` create the parent directories and write this
@@ -422,8 +426,10 @@ destroyed by an external edit cannot be identified as managed without a manifest
 New files use no-clobber creation, but a multi-file apply is not transactional.
 Source changes detected after publishing a native file fail with an incomplete
 apply receipt; the file may still be discoverable and must be reconciled manually.
-Stop other writers when adopting: directory backups and cross-filesystem copies
-are not atomic and can leave partial backups on failure.
+Stop all writers when adopting, including processes holding writable file
+handles: a concurrent replacement during the current raw-link adoption can be
+removed without backup. Directory backups and cross-filesystem copies are also
+not atomic and can leave partial backups on failure.
 On a caught partial failure the error lists installed paths and any adoption
 backup root: stop consumers, inspect/preserve concurrent edits, and manually
 reconcile or restore before retrying. An abrupt process or machine failure may

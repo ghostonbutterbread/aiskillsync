@@ -82,6 +82,94 @@ class AgentSyncTests(unittest.TestCase):
         self.assertNotIn('Do not spawn', source.read_text())
         self.assertEqual(build_agent_sync_plan(config, ('bbh',), ('omp',), dry_run=False).actions[0].action, 'skip')
 
+    def test_omp_double_quoted_yaml_escapes_roundtrip_into_projection(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        text = config_to_text(config_from_mapping(self.raw, self.config))
+        text += r'''
+agent_overlays:
+  claude:
+    reviewer:
+      frontmatter:
+        autoloadSkills: ["name with \"quote\", comma", "path\\name"]
+      instructions: "Do not say \"yes\"; keep \\ literally."
+'''
+        # This is literal user-authored YAML, not serializer-generated text.
+        self.config.write_text(text)
+        from aiskillsync.config import load_config
+        config = load_config(self.config)
+        overlay = config.agent_overlays['claude']['reviewer']
+        self.assertEqual(overlay['instructions'], 'Do not say "yes"; keep \\ literally.')
+        self.assertEqual(overlay['frontmatter']['autoloadSkills'], ['name with "quote", comma', 'path\\name'])
+        self.assertEqual(config_from_mapping(parse_simple_yaml(config_to_text(config)), self.config), config)
+        result = self.cli('agents', '--dest', 'claude')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = (self.destination / 'reviewer.md').read_text()
+        self.assertIn('Do not say "yes"; keep \\ literally.', output)
+        self.assertIn('name with \\"quote\\", comma', output)
+
+    def test_omp_double_quoted_block_list_item_with_escaped_quote_and_colon(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        text = config_to_text(config_from_mapping(self.raw, self.config))
+        self.config.write_text(text + r'''
+agent_overlays:
+  claude:
+    reviewer:
+      frontmatter:
+        autoloadSkills:
+          - "skill \"role: security\" name"
+''')
+        result = self.cli('agents', '--dest', 'claude')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = (self.destination / 'reviewer.md').read_text()
+        self.assertIn('skill \\\"role: security\\\" name', output)
+
+    def test_omp_rejects_unsupported_double_quoted_escape_without_writes(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        text = config_to_text(config_from_mapping(self.raw, self.config))
+        self.config.write_text(text + r'''
+agent_overlays:
+  claude:
+    reviewer:
+      instructions: "do \q not alter"
+''')
+        result = self.cli('agents', '--dest', 'claude')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unsupported double-quoted scalar', result.stderr + result.stdout)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_omp_rejects_malformed_single_quoted_overlay_without_writes(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        text = config_to_text(config_from_mapping(self.raw, self.config))
+        self.config.write_text(text + '''\nagent_overlays:\n  claude:\n    reviewer:\n      instructions: 'Do not 'silently' alter'\n''')
+        result = self.cli('agents', '--dest', 'claude')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unsupported single-quoted scalar', result.stderr + result.stdout)
+        self.assertFalse(self.destination.exists())
+
+    def test_omp_rejects_all_line_separators_in_overlay_text(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        for separator in ('\n', '\r', '\v', '\f', '\x1c', '\x1d', '\x1e', '\x85', '\u2028', '\u2029'):
+            for field in ('instructions', 'autoloadSkills'):
+                with self.subTest(separator=repr(separator), field=field):
+                    overlay = ({'instructions': 'one' + separator + 'two'} if field == 'instructions'
+                               else {'frontmatter': {'autoloadSkills': ['one' + separator + 'two']}})
+                    self.raw['agent_overlays'] = {'claude': {'reviewer': overlay}}
+                    with self.assertRaises(ConfigError):
+                        config_from_mapping(self.raw, self.config)
+        self.raw.pop('agent_overlays')
+        text = config_to_text(config_from_mapping(self.raw, self.config))
+        self.config.write_text(text + '''\nagent_overlays:\n  claude:\n    reviewer:\n      instructions: "one\\u2028two"\n''')
+        result = self.cli('agents', '--dest', 'claude')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('single-line', result.stderr + result.stdout)
+        self.assertFalse(self.destination.exists())
+
     def test_omp_overlay_config_roundtrips_quoted_instructions_and_skill_names(self):
         self.raw['agent_formats'] = {'claude': 'omp'}
         self.raw['agent_overlays'] = {'claude': {'reviewer': {

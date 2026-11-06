@@ -6,6 +6,7 @@ subset used by the documented config shape instead of depending on PyYAML.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -203,6 +204,10 @@ def load_config(path: str | Path | None = None) -> Config:
     return config_from_mapping(raw, config_path)
 
 
+def _nonempty_single_line(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and value.splitlines() == [value]
+
+
 def config_from_mapping(raw: Any, path: Path) -> Config:
     if not isinstance(raw, dict):
         raise ConfigError("config root must be a mapping")
@@ -336,7 +341,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             if not isinstance(overlay, dict) or set(overlay) - {"frontmatter", "instructions"}:
                 raise ConfigError(f"{context} supports only frontmatter and instructions")
             instruction = overlay.get("instructions")
-            if "instructions" in overlay and (not isinstance(instruction, str) or not instruction.strip() or '\n' in instruction or '\r' in instruction):
+            if "instructions" in overlay and not _nonempty_single_line(instruction):
                 raise ConfigError(f"{context}.instructions must be a non-empty single-line string")
             fields = overlay.get("frontmatter", {})
             if not isinstance(fields, dict):
@@ -351,7 +356,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
                     valid = isinstance(value, bool)
                 else:
                     valid = isinstance(value, list) and (bool(value) or key == "tools") and all(
-                        isinstance(item, str) and item.strip() and '\n' not in item and '\r' not in item for item in value)
+                        _nonempty_single_line(item) for item in value)
                     if key == "spawns" and value == "*":
                         valid = True
                 if not valid:
@@ -855,8 +860,15 @@ def _parse_mapping(
 
 def _split_key_value(text: str) -> tuple[str, str] | None:
     quote: str | None = None
+    escaped = False
     for index, char in enumerate(text):
         if quote is not None:
+            if escaped:
+                escaped = False
+                continue
+            if quote == '"' and char == "\\":
+                escaped = True
+                continue
             if char == quote:
                 quote = None
             continue
@@ -893,7 +905,16 @@ def _parse_scalar(value: str, line_number: int) -> Any:
         and value[0] == value[-1]
         and value[0] in ("'", '"')
     ):
-        return value[1:-1].replace("''", "'") if value[0] == "'" else value[1:-1]
+        if value[0] == "'":
+            if not re.fullmatch(r"(?:[^']|'')*", value[1:-1]):
+                raise ConfigError(f"unsupported single-quoted scalar near line {line_number}")
+            return value[1:-1].replace("''", "'")
+        try:
+            return json.loads(value)
+        except (ValueError, UnicodeError) as exc:
+            raise ConfigError(f"unsupported double-quoted scalar near line {line_number}: {exc}") from exc
+    if value.startswith(("'", '"')):
+        raise ConfigError(f"unterminated quoted scalar near line {line_number}")
     if value.startswith("[") and value.endswith("]"):
         return _parse_inline_list(value[1:-1], line_number)
     if value.startswith("[") or value.startswith("{"):
@@ -906,9 +927,16 @@ def _parse_inline_list(value: str, line_number: int) -> list[Any]:
         return []
     items: list[Any] = []
     quote: str | None = None
+    escaped = False
     start = 0
     for index, char in enumerate(value):
         if quote is not None:
+            if escaped:
+                escaped = False
+                continue
+            if quote == '"' and char == "\\":
+                escaped = True
+                continue
             if char == quote:
                 quote = None
             continue
