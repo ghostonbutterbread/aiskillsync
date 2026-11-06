@@ -30,6 +30,110 @@ class AgentRefreshTests(unittest.TestCase):
         return build_agent_sync_plan(config_from_mapping(self.raw, self.root / 'config'), ('src',), ('test',),
                                      dry_run=False, adopt=adopt, backup_root=self.backup)
 
+    def test_source_crlf_only_change_invalidates_plan(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        plan = self.plan()
+        self.agent.write_bytes(self.agent.read_bytes().replace(b'\n', b'\r\n'))
+        with self.assertRaisesRegex(ValueError, 'source changed'):
+            apply_agent_sync_plan(plan)
+        self.assertFalse((self.dest / 'reviewer.md').exists())
+
+    def test_edit_after_ownership_check_cannot_be_automatically_refreshed(self):
+        import aiskillsync.agents as agents
+        self.raw['agent_formats'] = {'test': 'omp'}
+        apply_agent_sync_plan(self.plan())
+        target = self.dest / 'reviewer.md'
+        self.agent.write_text(self.agent.read_text() + 'updated\n')
+        original = agents._owned_native
+        edited = target.read_bytes().replace(b'Original.', b'LOCAL!!!.')
+        self.assertEqual(len(edited), target.stat().st_size)
+        def edit_after_check(*args):
+            result = original(*args)
+            st = target.stat()
+            target.write_bytes(edited)
+            os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+            return result
+        with patch('aiskillsync.agents._owned_native', side_effect=edit_after_check):
+            plan = self.plan()
+        if not plan.has_blockers:
+            with self.assertRaises(ValueError):
+                apply_agent_sync_plan(plan)
+        self.assertEqual(target.read_bytes(), edited)
+
+    def test_stable_read_rejects_edit_during_read_with_restored_mtime(self):
+        from aiskillsync.agents import _stable_file_bytes
+        target = self.root / 'local'
+        target.write_bytes(b'original')
+        original_stat = target.stat()
+        fstat = os.fstat
+        calls = 0
+        def edit_at_second_stat(fd):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                target.write_bytes(b'modified')
+                os.utime(target, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            return fstat(fd)
+        with patch('aiskillsync.agents.os.fstat', side_effect=edit_at_second_stat):
+            with self.assertRaisesRegex(ValueError, 'changed while reading'):
+                _stable_file_bytes(target)
+
+    def test_destination_root_swap_at_publication_cannot_write_source(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.dest.mkdir()
+        protected = self.root / 'src' / 'skills'
+        protected.mkdir()
+        (self.dest / 'reviewer.md').write_text('local')
+        plan = self.plan(adopt=True)
+        original = self.agent.read_bytes()
+        link = os.link
+        def swap(src, dst, *args, **kwargs):
+            self.dest.rename(self.root / 'dest-moved')
+            self.dest.symlink_to(protected, target_is_directory=True)
+            return link(src, dst, *args, **kwargs)
+        with patch('aiskillsync.agents.os.link', side_effect=swap):
+            try:
+                apply_agent_sync_plan(plan)
+            except (ValueError, OSError):
+                pass
+        self.assertEqual(self.agent.read_bytes(), original)
+        self.assertFalse((protected / 'reviewer.md').exists())
+
+    def test_other_process_root_swap_at_displacement_preserves_source_and_recovery(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.write_text('local')
+        protected = self.root / 'src' / 'skills'
+        protected.mkdir()
+        protected_target = protected / 'reviewer.md'
+        protected_target.write_text('protected')
+        plan = self.plan(adopt=True)
+        rename = os.rename
+        def race(src, dst, *args, **kwargs):
+            subprocess.run([sys.executable, '-c',
+                            'import os,sys; os.rename(sys.argv[1],sys.argv[2]); os.symlink(sys.argv[3],sys.argv[1])',
+                            str(self.dest), str(self.root / 'dest-moved'), str(protected)], check=True)
+            return rename(src, dst, *args, **kwargs)
+        with patch('aiskillsync.agents.os.rename', side_effect=race):
+            try:
+                apply_agent_sync_plan(plan)
+            except (ValueError, OSError):
+                pass
+        self.assertTrue(protected_target.exists(), 'protected source entry was displaced')
+        self.assertEqual(protected_target.read_text(), 'protected')
+        snapshot = self.backup / 'agents/test/reviewer.md'
+        if snapshot.exists():
+            receipt = Path(json.loads((snapshot.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+            self.assertEqual(snapshot.read_text(), 'local')
+            displaced = Path(json.loads(receipt.read_text())['displaced'])
+            if displaced.exists():
+                self.assertEqual(displaced.read_text(), 'local')
+            else:
+                self.assertEqual((self.root / 'dest-moved' / 'reviewer.md').read_text(), 'local')
+        else:
+            self.assertEqual((self.root / 'dest-moved' / 'reviewer.md').read_text(), 'local')
+
     def test_native_refresh_preserves_previous_bytes(self):
         self.raw['agent_formats'] = {'test': 'omp'}
         apply_agent_sync_plan(self.plan())

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import tempfile
 from typing import Any
 
@@ -82,7 +83,9 @@ def _digest(text: str) -> str:
 
 
 def _native_content(agent: AgentDefinition, provider: str, overlay: dict[str, Any] | None = None) -> tuple[str, str]:
-    source = agent.path.read_text(encoding="utf-8")
+    source_bytes = agent.path.read_bytes()
+    # Keep universal-newline rendering while fingerprinting the original bytes.
+    source = source_bytes.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     lines = source.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
         raise ValueError(f"{agent.path}: source frontmatter changed during planning")
@@ -132,15 +135,37 @@ def _native_content(agent: AgentDefinition, provider: str, overlay: dict[str, An
     identity = _digest(str(agent.path))
     kind = "omp" if provider == "omp" else "native"
     marker = f"# aiskillsync-{kind}-v1 {identity} {_digest(body)}\n"
-    return prefix + marker + body, _digest(source)
+    return prefix + marker + body, hashlib.sha256(source_bytes).hexdigest()
+
+
+def _stable_file_bytes(path: Path) -> bytes:
+    """Read one regular inode; reject changes made while reading it."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("safe no-follow file reads are unavailable")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"not a regular file: {path}")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            data = handle.read()
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+        ):
+            raise ValueError(f"file changed while reading: {path}")
+        return data
+    finally:
+        os.close(fd)
 
 
 def _owned_native(path: Path, agent: AgentDefinition, provider: str) -> str | None:
     if path.is_symlink() or not path.is_file():
         return None
     try:
-        text = path.read_text(encoding="utf-8")
-        marked = text[4:] if text.startswith("---\n") else text
+        text = _stable_file_bytes(path).decode("utf-8")
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        marked = normalized[4:] if normalized.startswith("---\n") else normalized
         marker, body = marked.split("\n", 1)
         kind = "omp" if provider == "omp" else "native"
         if marker == f"# aiskillsync-{kind}-v1 {_digest(str(agent.path))} {_digest(body)}":
@@ -365,7 +390,8 @@ def build_agent_sync_plan(
                                 try:
                                     overlay = config.agent_overlays.get(destination, {}).get(owner.name)
                                     expected_content, _ = _native_content(owner, provider, overlay)
-                                    if _owned_native(entry, owner, provider) != expected_content:
+                                    owned_entry = _owned_native(entry, owner, provider)
+                                    if owned_entry is None or owned_entry.replace("\r\n", "\n").replace("\r", "\n") != expected_content:
                                         errors.append(f"stale or edited unselected managed agent {entry}: reconcile manually or select it")
                                 except (OSError, UnicodeError, ValueError) as exc:
                                     errors.append(f"invalid managed agent source for {entry}: {exc}")
@@ -396,13 +422,14 @@ def build_agent_sync_plan(
                 errors.append(f"agent destination {destination}: {path} would replace a source file")
                 continue
             expected_state = _entry_state(path)
+            owned = None
             if provider:
                 if not path.exists() and not path.is_symlink():
                     action = "write"
                 else:
                     owned = _owned_native(path, agent, provider)
                     if owned is not None:
-                        if owned == content:
+                        if owned.replace("\r\n", "\n").replace("\r", "\n") == content:
                             action = "skip"
                         else:
                             action = "refresh"
@@ -415,9 +442,12 @@ def build_agent_sync_plan(
             else:
                 action = "adopt" if adopt else "conflict"
             try:
-                previous_bytes = path.read_bytes() if action in {"refresh", "adopt"} and path.is_file() and not path.is_symlink() else None
-            except OSError as exc:
+                previous_bytes = _stable_file_bytes(path) if action in {"refresh", "adopt"} and path.is_file() and not path.is_symlink() else None
+            except (OSError, ValueError) as exc:
                 errors.append(f"cannot snapshot agent destination during planning: {path}: {exc}")
+                continue
+            if action == "refresh" and (owned is None or previous_bytes != owned.encode("utf-8")):
+                errors.append(f"agent destination changed between ownership check and snapshot: {path}")
                 continue
             if expected_state != _entry_state(path):
                 errors.append(f"agent destination changed during planning: {path}")
@@ -504,7 +534,7 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
             raise ValueError(error)
         if not action.agent.path.is_file():
             raise ValueError(f"agent source missing before apply: {action.agent.path}")
-        if action.source_digest is not None and _digest(action.agent.path.read_text(encoding="utf-8")) != action.source_digest:
+        if action.source_digest is not None and hashlib.sha256(action.agent.path.read_bytes()).hexdigest() != action.source_digest:
             raise ValueError(f"agent source changed before apply: {action.agent.path}")
     adoptions = tuple(action for action in plan.actions if action.action in {"adopt", "refresh"})
     if adoptions and plan.backup_root is None:
@@ -523,7 +553,7 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                 continue
             if _entry_state(action.path) != action.expected_state:
                 raise ValueError(f"agent destination changed before apply: {action.path}")
-            if action.source_digest is not None and _digest(action.agent.path.read_text(encoding="utf-8")) != action.source_digest:
+            if action.source_digest is not None and hashlib.sha256(action.agent.path.read_bytes()).hexdigest() != action.source_digest:
                 raise ValueError(f"agent source changed before apply: {action.agent.path}")
             action.path.parent.mkdir(parents=True, exist_ok=True)
             private = None
@@ -544,7 +574,7 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                         # Hard-link create refuses a concurrently created destination.
                         os.link(temp_name, action.path)
                         completed.append(action.path)
-                        if _digest(action.agent.path.read_text(encoding="utf-8")) != action.source_digest:
+                        if hashlib.sha256(action.agent.path.read_bytes()).hexdigest() != action.source_digest:
                             raise ValueError(f"agent source changed during apply: {action.agent.path}")
                         os.unlink(temp_name)
                     else:

@@ -2,7 +2,15 @@
 
 - **Branch/worktree:** `feat/managed-agent-refresh`, `/home/ryushe/worktrees/aiskillsync-managed-agent-refresh`.
 - **Base:** `da2c6e8` (parser checkpoint on `77307e73afb7a2ab17298fae4439ac4ba5c6d910`, `feat/omp-agent-overlays`). Intended handoff to `feat/omp-agent-overlays`, then `beta` (`origin/beta` fetched at `850e6819e5ba9c21b8f07ab80b1d547844810f3a`). The separately owned `fix/agent-overlay-parser-compat` worktree must be reconciled by the parent; this checkpoint does not modify `config.py` or parser tests. The raw adoption defect predates this feature and must be propagated to all affected descendant/integration lanes when the parent integrates it.
-- **Checkpoint:** branch tip containing this dossier; initial immutable base `da2c6e8`. Version `0.1.40` once. Local work only; no push, merge, Hoster edit, deployment or activation authorized.
+- **Checkpoint:** incomplete follow-up to `e5bc48ed48475aad50ecc4967f4cfc5546bb2518`; initial immutable base `da2c6e8`. Version `0.1.41`. Local work only; no push, merge, Hoster edit, deployment or activation authorized.
+
+## Independent review blockers — NOT READY FOR INTEGRATION
+
+- Destination-root replacement with a symlink between the last check and the publication or displacement syscall redirects operations into a protected source tree. The two `test_*root_swap*` regressions demonstrate this in-process at publication and via a separate process at displacement. **Still unfixed.** Before integrating, bind directory traversal, publication, displacement, backup and recovery operations to validated directory handles with no unsafe platform fallback; exercise initial write, refresh and adoption, swaps at each check/syscall boundary, and recoverability after swap and interruption. A pathname recheck alone is insufficient. Preserve snapshot and displaced inode semantics.
+- Ownership-versus-snapshot mismatch when an edited file has the same size and restored mtime: the new test reproduces it against `e5bc48e` and now passes. Current candidate checks the stable-read ownership bytes against the stable-read snapshot bytes and checks metadata including ctime during each read. A mutation between the read and final fstat with restored mtime is rejected in the added test. It needs independent review for platform semantics; it is not a guarantee against writes after return.
+- Source digest used newline-normalized text rather than exact bytes: the CRLF-only plan/apply regression was red against `e5bc48e` and now passes. The digest now hashes source bytes while rendering retains universal-newline behavior.
+- Resume by fixing the root-swap blocker in `aiskillsync/agents.py`, retaining `tests/test_agent_refresh.py` regressions; run the complete isolated unittest suite, require all existing and new tests to pass, and obtain independent review. The separately owned parser fix remains out of scope.
+- Follow-up suite in isolated HOME/XDG/TMPDIR: `python -m unittest discover -s tests -q` ran 207 tests, with **two failures**, the two root-swap regressions, and one optional skip. All other tests passed. CLI version and copied-source installed package metadata both reported `0.1.41`. These are partial-work receipts, not a release gate.
 
 ## Contract
 
