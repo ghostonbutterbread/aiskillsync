@@ -1441,6 +1441,7 @@ def _with_adhoc_repositories(
             ai_skill_paths=config.ai_skill_paths,
             ai_agent_paths=config.ai_agent_paths,
             agent_formats=config.agent_formats,
+            agent_overlays=config.agent_overlays,
             bbh_launcher_path=config.bbh_launcher_path,
             bbh_launcher_lane_group=config.bbh_launcher_lane_group,
             sync=config.sync,

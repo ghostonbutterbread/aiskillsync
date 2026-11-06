@@ -56,6 +56,154 @@ class AgentSyncTests(unittest.TestCase):
             text=True, capture_output=True,
         )
 
+    def test_omp_overlay_projects_native_fields_and_canonical_body_only_to_omp(self):
+        source = self.agent()
+        source.write_text(source.read_text().replace('description:', 'advertise: true\ndescription:', 1))
+        self.raw['ai_agent_paths']['omp'] = str(self.base / 'omp')
+        self.raw['agent_formats'] = {'omp': 'omp'}
+        self.raw['agent_overlays'] = {'omp': {'reviewer': {
+            'frontmatter': {'thinkingLevel': 'max', 'autoloadSkills': ['safety', 'review']},
+            'instructions': 'Do not spawn nested task children.'}}}
+        config = config_from_mapping(self.raw, self.config)
+        self.assertEqual(config_from_mapping(parse_simple_yaml(config_to_text(config)), self.config), config)
+        plan = build_agent_sync_plan(config, ('bbh',), ('omp', 'claude'), dry_run=False)
+        self.assertFalse(plan.has_blockers, plan.errors)
+        apply_agent_sync_plan(plan)
+        target = self.base / 'omp' / 'reviewer.md'
+        content = target.read_text()
+        meta = parse_simple_yaml(content.split('---\n', 2)[1])
+        self.assertEqual(meta['name'], 'reviewer')
+        self.assertEqual(meta['thinkingLevel'], 'max')
+        self.assertEqual(meta['autoloadSkills'], ['safety', 'review'])
+        self.assertNotIn('model', meta)
+        self.assertIn('Review safely.\n', content.split('---\n', 2)[2])
+        self.assertIn('Do not spawn nested task children.', content.split('---\n', 2)[2])
+        self.assertEqual((self.destination / 'reviewer.md').resolve(), source)
+        self.assertNotIn('Do not spawn', source.read_text())
+        self.assertEqual(build_agent_sync_plan(config, ('bbh',), ('omp',), dry_run=False).actions[0].action, 'skip')
+
+    def test_omp_overlay_config_roundtrips_quoted_instructions_and_skill_names(self):
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        self.raw['agent_overlays'] = {'claude': {'reviewer': {
+            'frontmatter': {'autoloadSkills': ['a "quoted" skill', 'path\\\\name']},
+            'instructions': 'Don\'t say "yes" and retain \\\\ literally # note'}}}
+        original = config_from_mapping(self.raw, self.config)
+        restored = config_from_mapping(parse_simple_yaml(config_to_text(original)), self.config)
+        self.assertEqual(restored, original)
+
+    def test_omp_overlay_keeps_canonical_body_bytes_when_appending_instructions(self):
+        source = self.agent()
+        source.write_text(source.read_text() + '\n\n')
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        self.raw['agent_overlays'] = {'claude': {'reviewer': {'instructions': 'Do not delegate.'}}}
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ('bbh',), ('claude',), dry_run=False)
+        apply_agent_sync_plan(plan)
+        body = (self.destination / 'reviewer.md').read_text().split('---\n', 2)[2]
+        self.assertTrue(body.startswith(source.read_text().split('---\n', 2)[2]))
+        self.assertIn('Do not delegate.', body)
+
+    def test_omp_rejects_unknown_overlay_roles_instead_of_silently_ignoring_them(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        self.raw['agent_overlays'] = {'claude': {'typo': {'instructions': 'Do not delegate.'}}}
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ('bbh',), ('claude',), dry_run=False)
+        self.assertIn('overlay', ' '.join(plan.errors).lower())
+        self.assertTrue(plan.has_blockers)
+        self.assertFalse(self.destination.exists())
+
+    def test_omp_supported_extra_frontmatter_roundtrips_and_projects(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        self.raw['agent_overlays'] = {'claude': {'reviewer': {'frontmatter': {
+            'tools': [], 'spawns': ['inspector'], 'blocking': False, 'readSummarize': True}}}}
+        config = config_from_mapping(self.raw, self.config)
+        config = config_from_mapping(parse_simple_yaml(config_to_text(config)), self.config)
+        apply_agent_sync_plan(build_agent_sync_plan(config, ('bbh',), ('claude',), dry_run=False))
+        fields = parse_simple_yaml((self.destination / 'reviewer.md').read_text().split('---\n', 2)[1])
+        self.assertEqual(fields['tools'], [])
+        self.assertEqual(fields['spawns'], ['inspector'])
+        self.assertIs(fields['blocking'], False)
+        self.assertIs(fields['readSummarize'], True)
+
+    def test_omp_overlay_accepts_native_inherit_thinking_level(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        self.raw['agent_overlays'] = {'claude': {'reviewer': {'frontmatter': {'thinkingLevel': 'inherit'}}}}
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ('bbh',), ('claude',), dry_run=False)
+        apply_agent_sync_plan(plan)
+        fields = parse_simple_yaml((self.destination / 'reviewer.md').read_text().split('---\n', 2)[1])
+        self.assertEqual(fields['thinkingLevel'], 'inherit')
+
+    def test_omp_overlay_rejects_invalid_fields_and_unenforceable_empty_spawns(self):
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        invalid = [
+            {'frontmatter': {'model': 'provider/fixed'}},
+            {'frontmatter': {'thinking-level': 'max'}},
+            {'frontmatter': {'spawns': []}},
+            {'frontmatter': {'autoloadSkills': []}},
+            {'frontmatter': {'autoloadSkills': 'safety'}},
+            {'frontmatter': {'thinkingLevel': 'typo'}},
+            {'frontmatter': {'unknown': 'value'}},
+            {'extra': 'silently ignored?'},
+            {'instructions': None},
+        ]
+        for overlay in invalid:
+            with self.subTest(overlay=overlay), self.assertRaises(ConfigError):
+                self.raw['agent_overlays'] = {'claude': {'reviewer': overlay}}
+                config_from_mapping(self.raw, self.config)
+        self.raw['agent_formats'] = {'claude': 'opencode'}
+        self.raw['agent_overlays'] = {'claude': {'reviewer': {'instructions': 'Do not delegate.'}}}
+        with self.assertRaises(ConfigError):
+            config_from_mapping(self.raw, self.config)
+
+    def test_omp_unmodified_source_change_and_local_edits_are_preserved_as_conflicts(self):
+        source = self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        self.raw['agent_overlays'] = {'claude': {'reviewer': {'instructions': 'Do not delegate.'}}}
+        config = config_from_mapping(self.raw, self.config)
+        apply_agent_sync_plan(build_agent_sync_plan(config, ('bbh',), ('claude',), dry_run=False))
+        target = self.destination / 'reviewer.md'
+        previous = target.read_bytes()
+        source.write_text(source.read_text() + 'Updated canonical body.\n')
+        changed = build_agent_sync_plan(config, ('bbh',), ('claude',), dry_run=False, adopt=True,
+                                        backup_root=self.base / 'backup')
+        self.assertTrue(changed.has_blockers)
+        self.assertEqual(changed.actions[0].action, 'conflict')
+        self.assertIn('manual retirement', ' '.join(changed.errors))
+        with self.assertRaises(ValueError):
+            apply_agent_sync_plan(changed)
+        self.assertEqual(target.read_bytes(), previous)
+        target.write_text(target.read_text() + 'Local edit.\n')
+        edited = target.read_bytes()
+        conflict = build_agent_sync_plan(config, ('bbh',), ('claude',), dry_run=False, adopt=True,
+                                         backup_root=self.base / 'backup')
+        self.assertTrue(conflict.has_blockers)
+        with self.assertRaises(ValueError):
+            apply_agent_sync_plan(conflict)
+        self.assertEqual(target.read_bytes(), edited)
+        self.assertFalse((self.base / 'backup').exists())
+        saved = self.base / 'manual-backup.md'
+        target.rename(saved)
+        apply_agent_sync_plan(build_agent_sync_plan(config, ('bbh',), ('claude',), dry_run=False))
+        self.assertEqual(saved.read_bytes(), edited)
+        self.assertIn('Updated canonical body.', target.read_text())
+        self.assertIn('Do not delegate.', target.read_text())
+
+    def test_omp_legacy_symlink_is_not_adopted_over_existing_source(self):
+        source = self.agent()
+        self.destination.mkdir(parents=True)
+        target = self.destination / 'reviewer.md'
+        target.symlink_to(source)
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ('bbh',), ('claude',),
+                                     dry_run=False, adopt=True, backup_root=self.base / 'backup')
+        self.assertTrue(plan.has_blockers)
+        with self.assertRaises(ValueError):
+            apply_agent_sync_plan(plan)
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(target.resolve(), source)
+        self.assertFalse((self.base / 'backup').exists())
+
     @unittest.skipUnless(importlib.util.find_spec("tomllib"), "tomllib requires Python 3.11+")
     def test_native_codex_projection_preserves_prompt_and_inherits_model(self):
         import tomllib
@@ -370,7 +518,7 @@ class AgentSyncTests(unittest.TestCase):
         self.raw["agent_formats"] = {"claude": "opencode"}
         config = config_from_mapping(self.raw, self.config)
         self.assertEqual(config_from_mapping(parse_simple_yaml(config_to_text(config)), self.config), config)
-        for formats in ({"missing": "codex"}, {"claude": "omp"}, {"claude": "pi"}, {"claude": []}, []):
+        for formats in ({"missing": "codex"}, {"claude": "pi"}, {"claude": []}, []):
             with self.subTest(formats=formats), self.assertRaises(ConfigError):
                 self.raw["agent_formats"] = formats
                 config_from_mapping(self.raw, self.config)

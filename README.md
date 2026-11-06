@@ -337,9 +337,11 @@ Opt in per destination (names are arbitrary, format values are not):
 ai_agent_paths:
   codex: ~/.codex/agents
   opencode: ~/.config/opencode/agents
+  omp: ~/.omp/agent/agents
 agent_formats:
   codex: codex
   opencode: opencode
+  omp: omp
 ```
 
 The source must have `name` and `description` frontmatter; `advertise: true`
@@ -353,11 +355,51 @@ body becomes the native instructions without intentional rewriting. Codex writes
 `<name>.toml` with `name`, `description`, and `developer_instructions`;
 OpenCode writes `<name>.md` with `mode: subagent` and `permission.task: deny`.
 The OpenCode permission prohibits child delegation; it does not restrict other
-tools or automatically preload skills.
+tools or automatically preload skills. OMP writes `<name>.md` with OMP name,
+description, optional configured frontmatter, and canonical body.
 No model is pinned. Codex can use its supported per-spawn model setting;
 OpenCode model selection depends on the installed version and launch surface,
 and an unpinned agent does not itself add per-invocation model selection.
 Runtime permissions, skills, and provider availability must be evaluated separately.
+
+OMP overlays are trusted, destination- and role-specific configuration; they
+never change the canonical source or other destinations. For example (replace
+the destination and role names to match your configuration):
+
+```yaml
+agent_overlays:
+  omp:
+    bunny-recon:
+      frontmatter:
+        thinkingLevel: max
+        autoloadSkills: [bunny-collaborative, general-security-testing-policy, live-testing-policy, xss]
+      instructions: Do not spawn nested task children.
+    bunny-hunter:
+      frontmatter:
+        thinkingLevel: max
+        autoloadSkills: [bunny-collaborative, general-security-testing-policy, live-testing-policy, xss]
+      instructions: Do not spawn nested task children.
+```
+
+`frontmatter` supports `thinkingLevel`, `autoloadSkills`, `tools`, `spawns`,
+`blocking`, and `readSummarize` in the documented config subset. Use nonempty
+string lists for skills and spawn names, a string list (possibly empty) for
+tools, `"*"` for unrestricted spawns, and booleans for the last two fields.
+`model` and other fields are rejected rather than silently ignored; the
+projection never pins a model. `instructions` is optional single-line text
+appended to the source body. Unknown overlays or roles not present in the
+selected source set block the plan; include the owning source when selecting
+repos. Existing raw OMP links or local files block native projection even with
+`--adopt`: inspect them, record their settings in config, stop other writers,
+and move them to a safe backup outside discovery before the initial native sync.
+
+The no-nested-worker instruction is cooperative, **not enforcement**. OMP
+18.16.0 maps `spawns: []` to undefined, so this config rejects that value; an
+omitted spawn policy must not be described as a denial. Model selection,
+available skills, and whether instructions are followed depend on the OMP
+runtime and launch settings; omitting `model` alone does not prove per-run
+selection works. OMP's `thinking-level` spelling normalizes to `thinkingLevel`;
+use the latter in this config.
 
 Native projections are regular managed files, not symlinks. A source-path and
 content checksum marker identifies generated files. Existing local definitions,
@@ -387,10 +429,7 @@ backup root: stop consumers, inspect/preserve concurrent edits, and manually
 reconcile or restore before retrying. An abrupt process or machine failure may
 not emit that receipt; inspect the full destination before restarting. Skill and
 agent application and separate profile plans are not a single transaction.
-OMP is deliberately unsupported: its current `parseAgentFields` maps
-`spawns: []` to undefined, and an undefined spawn policy is unrestricted, so
-that superficially safe field does not ensure no delegation. Pi extensions and
-Hermes also have no native adapter here; select no format
+Pi extensions and Hermes have no native adapter here; select no format
 only if raw linking is independently verified for that exact consumer. Codex
 standalone agent discovery requires a Codex release that supports that contract.
 See [Codex subagents](https://developers.openai.com/codex/subagents),

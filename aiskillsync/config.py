@@ -7,6 +7,7 @@ subset used by the documented config shape instead of depending on PyYAML.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -127,6 +128,7 @@ class Config:
     profile_sets: tuple[ProfileSetConfig, ...] = field(default_factory=tuple)
     ai_agent_paths: dict[str, Path] = field(default_factory=dict)
     agent_formats: dict[str, str] = field(default_factory=dict)
+    agent_overlays: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
 
 
 def expand_path(value: str | Path) -> Path:
@@ -316,9 +318,44 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
     for name, value in formats_raw.items():
         if name not in agent_paths:
             raise ConfigError(f"agent_formats references unknown agent destination: {name}")
-        if value not in ("codex", "opencode"):
-            raise ConfigError(f"agent_formats.{name} must be codex or opencode")
+        if value not in ("codex", "opencode", "omp"):
+            raise ConfigError(f"agent_formats.{name} must be codex, opencode, or omp")
         formats[name] = value
+    overlays = raw.get("agent_overlays", {})
+    if not isinstance(overlays, dict):
+        raise ConfigError("agent_overlays must be a mapping")
+    for destination, roles in overlays.items():
+        if formats.get(destination) != "omp":
+            raise ConfigError(f"agent_overlays.{destination} requires an omp destination")
+        if not isinstance(roles, dict):
+            raise ConfigError(f"agent_overlays.{destination} must be a mapping")
+        for role, overlay in roles.items():
+            context = f"agent_overlays.{destination}.{role}"
+            if not isinstance(role, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", role):
+                raise ConfigError(f"{context}: invalid agent name")
+            if not isinstance(overlay, dict) or set(overlay) - {"frontmatter", "instructions"}:
+                raise ConfigError(f"{context} supports only frontmatter and instructions")
+            instruction = overlay.get("instructions")
+            if "instructions" in overlay and (not isinstance(instruction, str) or not instruction.strip() or '\n' in instruction or '\r' in instruction):
+                raise ConfigError(f"{context}.instructions must be a non-empty single-line string")
+            fields = overlay.get("frontmatter", {})
+            if not isinstance(fields, dict):
+                raise ConfigError(f"{context}.frontmatter must be a mapping")
+            supported = {"thinkingLevel", "autoloadSkills", "tools", "spawns", "blocking", "readSummarize"}
+            if set(fields) - supported:
+                raise ConfigError(f"{context}.frontmatter contains unsupported fields: {', '.join(sorted(map(str, set(fields) - supported)))}")
+            for key, value in fields.items():
+                if key == "thinkingLevel":
+                    valid = isinstance(value, str) and value in {"inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"}
+                elif key in {"blocking", "readSummarize"}:
+                    valid = isinstance(value, bool)
+                else:
+                    valid = isinstance(value, list) and (bool(value) or key == "tools") and all(
+                        isinstance(item, str) and item.strip() and '\n' not in item and '\r' not in item for item in value)
+                    if key == "spawns" and value == "*":
+                        valid = True
+                if not valid:
+                    raise ConfigError(f"{context}.frontmatter.{key} has an invalid value")
     agent_roots: dict[Path, str] = {}
     skill_roots = {canonical_path(root) for root in destinations.values()}
     for name, root in agent_paths.items():
@@ -506,6 +543,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
         ai_skill_paths=destinations,
         ai_agent_paths=agent_paths,
         agent_formats=formats,
+        agent_overlays=overlays,
         bbh_launcher_path=bbh_launcher_path,
         bbh_launcher_lane_group=bbh_launcher_lane_group,
         sync=SyncConfig(
@@ -580,6 +618,28 @@ def config_to_text(config: Config) -> str:
         for key, value in sorted(config.agent_formats.items()):
             lines.append(f"  {key}: {_format_scalar(value)}")
 
+    if config.agent_overlays:
+        lines.extend(("", "agent_overlays:"))
+        for destination, roles in sorted(config.agent_overlays.items()):
+            lines.append(f"  {destination}:")
+            for role, overlay in sorted(roles.items()):
+                lines.append(f"    {role}:")
+                if "instructions" in overlay:
+                    lines.append(f"      instructions: {_format_overlay_scalar(overlay['instructions'])}")
+                if "frontmatter" in overlay:
+                    lines.append("      frontmatter:")
+                    for key, value in sorted(overlay["frontmatter"].items()):
+                        if isinstance(value, list):
+                            if not value:
+                                lines.append(f"        {key}: []")
+                            else:
+                                lines.append(f"        {key}:")
+                                lines.extend(f"          - {_format_overlay_scalar(item)}" for item in value)
+                        elif isinstance(value, bool):
+                            lines.append(f"        {key}: {str(value).lower()}")
+                        else:
+                            lines.append(f"        {key}: {_format_overlay_scalar(value)}")
+
     if config.profile_sets:
         lines.extend(("", "profile_sets:"))
         for profile in config.profile_sets:
@@ -620,6 +680,11 @@ def config_to_text(config: Config) -> str:
             lines.append(f"    - {_format_scalar(skill_name)}")
     lines.append("")
     return "\n".join(lines)
+
+
+def _format_overlay_scalar(value: str) -> str:
+    """Use YAML single-quoted scalars so overlay text round-trips literally."""
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _format_scalar(value: str | Path) -> str:
@@ -689,7 +754,7 @@ def _strip_inline_comment(line: str) -> str:
         if escaped:
             escaped = False
             continue
-        if char == "\\":
+        if char == "\\" and quote != "'":
             escaped = True
             continue
         if quote is not None:
@@ -828,7 +893,7 @@ def _parse_scalar(value: str, line_number: int) -> Any:
         and value[0] == value[-1]
         and value[0] in ("'", '"')
     ):
-        return value[1:-1]
+        return value[1:-1].replace("''", "'") if value[0] == "'" else value[1:-1]
     if value.startswith("[") and value.endswith("]"):
         return _parse_inline_list(value[1:-1], line_number)
     if value.startswith("[") or value.startswith("{"):

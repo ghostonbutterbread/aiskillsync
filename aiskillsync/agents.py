@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+from typing import Any
 
 from .config import BridgeConfig, Config, ConfigError, _strip_inline_comment, canonical_path, parse_simple_yaml
 from .lanes import effective_config
@@ -80,7 +81,7 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _native_content(agent: AgentDefinition, provider: str) -> tuple[str, str]:
+def _native_content(agent: AgentDefinition, provider: str, overlay: dict[str, Any] | None = None) -> tuple[str, str]:
     source = agent.path.read_text(encoding="utf-8")
     lines = source.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
@@ -109,23 +110,40 @@ def _native_content(agent: AgentDefinition, provider: str) -> tuple[str, str]:
         body = (f"name = {quote(agent.name)}\ndescription = {quote(agent.description)}\n"
                 f"developer_instructions = {quote(prompt)}\n")
         prefix = ""
-    else:
+    elif provider == "opencode":
         body = (f"description: {quote(agent.description)}\nmode: subagent\n"
                 f"permission:\n  task: deny\n---\n{prompt}")
         prefix = "---\n"
+    elif provider == "omp":
+        if agent.name in {"main", "sub"}:
+            raise ValueError(f"{agent.path}: OMP reserves the agent name {agent.name!r}")
+        overlay = overlay or {}
+        fields = overlay.get("frontmatter", {})
+        body = f"name: {quote(agent.name)}\ndescription: {quote(agent.description)}\n"
+        for key, value in sorted(fields.items()):
+            body += f"{key}: {json.dumps(value, ensure_ascii=False)}\n"
+        instruction = overlay.get("instructions")
+        if instruction:
+            prompt += ("\n" if prompt.endswith("\n") else "\n\n") + instruction + "\n"
+        body += "---\n" + prompt
+        prefix = "---\n"
+    else:
+        raise ValueError(f"unknown native provider: {provider}")
     identity = _digest(str(agent.path))
-    marker = f"# aiskillsync-native-v1 {identity} {_digest(body)}\n"
+    kind = "omp" if provider == "omp" else "native"
+    marker = f"# aiskillsync-{kind}-v1 {identity} {_digest(body)}\n"
     return prefix + marker + body, _digest(source)
 
 
-def _owned_native(path: Path, agent: AgentDefinition) -> str | None:
+def _owned_native(path: Path, agent: AgentDefinition, provider: str) -> str | None:
     if path.is_symlink() or not path.is_file():
         return None
     try:
         text = path.read_text(encoding="utf-8")
         marked = text[4:] if text.startswith("---\n") else text
         marker, body = marked.split("\n", 1)
-        if marker == f"# aiskillsync-native-v1 {_digest(str(agent.path))} {_digest(body)}":
+        kind = "omp" if provider == "omp" else "native"
+        if marker == f"# aiskillsync-{kind}-v1 {_digest(str(agent.path))} {_digest(body)}":
             return text
         return None
     except (OSError, UnicodeError, ValueError):
@@ -305,6 +323,10 @@ def build_agent_sync_plan(
             if skill_md.is_file() or skill_md.is_symlink():
                 source_files.update(_source_entries(skill_md))
     for destination in destination_names:
+        if not pending_clone:
+            unknown_overlays = set(config.agent_overlays.get(destination, {})) - {agent.name for agent in discovered}
+            if unknown_overlays:
+                errors.append(f"agent overlays for {destination} not found in selected sources: " + ", ".join(sorted(unknown_overlays)))
         root = config.ai_agent_paths[destination]
         resolved_root = canonical_path(root)
         if any(resolved_root.is_relative_to(source) or source.is_relative_to(resolved_root)
@@ -330,17 +352,19 @@ def build_agent_sync_plan(
                         with entry.open("rb") as handle:
                             first = handle.readline()
                             marker = handle.readline() if first.rstrip(b"\r\n") == b"---" else first
-                        match = re.fullmatch(rb"# aiskillsync-native-v1 ([0-9a-f]{64}) [0-9a-f]{64}(?:\r?\n)?", marker)
-                        marker_format = "opencode" if first.rstrip(b"\r\n") == b"---" else "codex"
+                        match = re.fullmatch(rb"# aiskillsync-(native|omp)-v1 ([0-9a-f]{64}) [0-9a-f]{64}(?:\r?\n)?", marker)
+                        marker_format = ("omp" if match and match.group(1) == b"omp" else
+                                         "opencode" if first.rstrip(b"\r\n") == b"---" else "codex")
                         if match:
-                            owner = valid_ids.get(match.group(1).decode())
+                            owner = valid_ids.get(match.group(2).decode())
                             expected_name = f"{owner.name}.{'toml' if provider == 'codex' else 'md'}" if owner else None
                             if owner is None or provider is None or marker_format != provider or expected_name != entry.name:
                                 errors.append(f"stale or invalid managed agent {entry}: source missing, malformed, renamed, or outside selected sources; preserve and reconcile manually")
                             else:
                                 try:
-                                    expected_content, _ = _native_content(owner, provider)
-                                    if _owned_native(entry, owner) != expected_content:
+                                    overlay = config.agent_overlays.get(destination, {}).get(owner.name)
+                                    expected_content, _ = _native_content(owner, provider, overlay)
+                                    if _owned_native(entry, owner, provider) != expected_content:
                                         errors.append(f"stale or edited managed agent {entry}: manual retirement or reconciliation required; stop the consumer and preserve a backup outside its discovery root")
                                 except (OSError, UnicodeError, ValueError) as exc:
                                     errors.append(f"invalid managed agent source for {entry}: {exc}")
@@ -358,7 +382,8 @@ def build_agent_sync_plan(
             source_digest = None
             if provider:
                 try:
-                    content, source_digest = _native_content(agent, provider)
+                    overlay = config.agent_overlays.get(destination, {}).get(agent.name)
+                    content, source_digest = _native_content(agent, provider, overlay)
                 except (OSError, UnicodeError, ValueError) as exc:
                     errors.append(f"destination {destination}: {exc}")
                     continue
@@ -372,7 +397,7 @@ def build_agent_sync_plan(
                 if not path.exists() and not path.is_symlink():
                     action = "write"
                 else:
-                    owned = _owned_native(path, agent)
+                    owned = _owned_native(path, agent, provider)
                     if owned is not None:
                         if owned == content:
                             action = "skip"
