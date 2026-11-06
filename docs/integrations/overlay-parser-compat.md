@@ -1,0 +1,25 @@
+# Overlay parser compatibility — proposal dossier
+
+- **Status:** proposal, awaiting independent re-review; not integrated or activated.
+- **Owner/worktree:** delegated parser-compat builder, `/home/ryushe/worktrees/aiskillsync-overlay-parser-compat`.
+- **Branch:** `fix/agent-overlay-parser-compat`; immutable base/checkpoint `da2c6e8` (exact candidate on `feat/managed-agent-refresh`). Intended immediate target: `feat/managed-agent-refresh`; eventual parent `feat/omp-agent-overlays`, then `beta`, subject to independent review and parent integration decisions. The defect was introduced by `da2c6e8`; no other descendant has been modified or propagation authorized.
+- **Implementation commit:** the commit containing this file, identified by the branch tip and accompanying handoff; a commit cannot embed its own SHA. No shared refs were fetched or changed: the task required an exact local base and worktree-only edits, not upstream integration.
+
+## Intent and contract
+
+Repair the shared-parser compatibility regressions identified in independent review without losing safe new OMP escape handling. Legacy scalar parsing and list/delimiter behavior follow the pre-`da2c6e8` implementation: in particular double-quoted backslashes are literal, unknown escapes and previously accepted single-quote/unterminated scalars retain prior meaning. The parser switches to strict JSON-compatible double-quoted escapes only within the root `agent_overlays` subtree, including block and inline lists. Unsupported escapes and unpaired decoded Unicode surrogates are `ConfigError`s. Overlay values must remain single-line; non-CR/LF splitlines separators inside the subtree are rejected before they can silently split an instruction. Actual Unicode characters formed by a valid surrogate pair remain supported.
+
+Config serialization uses single-quoted scalar escaping where necessary and verifies that the resulting UTF-8 text reparses into the identical `Config`; values or mapping keys the existing subset cannot represent are rejected with `ConfigError` rather than silently changed. Actual tabs in valid bridge names and mapping keys are preserved. This does not claim to implement general YAML. README documents the scope. The inherited managed-refresh dossier describes the historical `da2c6e8` parser behavior; this proposal supersedes that parser assessment only, not its refresh or raw-adoption safety blockers.
+
+## Evidence
+
+- TDD RED→GREEN: legacy `repo_dir` containing `\\t` failed by becoming a tab and `\\qual` errored; both now retain literal backslashes. A tab-name/quoted-backslash roundtrip first changed a path; now it is equal. An unpaired `\\ud800` overlay CLI test first failed to produce a clear surrogate diagnostic; now it errors before writes and without traceback. U+2028 previously split a plain instruction into a valid sibling mapping and allowed projection; it is now rejected. Unrepresentable U+2028 paths and colon-containing keys first serialized without error; they now fail safely. Existing and new end-to-end tests cover double-quoted instructions, escaped quote/comment/colon/comma delimiters, unsupported escapes, and serializer/reparse/projection. Valid surrogate pairs and legacy loose quotes are covered.
+- Final isolated full suite: `env HOME=<fixture>/home XDG_CONFIG_HOME=<fixture>/config XDG_CACHE_HOME=<fixture>/cache XDG_DATA_HOME=<fixture>/data XDG_STATE_HOME=<fixture>/state TMPDIR=<fixture>/tmp PYTHONPATH="$PWD" python -m unittest discover -s tests -v` → **Ran 201 tests in 18.553s; OK (skipped=1)**. The skip is optional OpenCode native loader (`OPENCODE_TEST_BIN` unset). Fixture and ephemeral log: `$TMPDIR/ais-parser-tests` as inherited when starting the command, under the profile scratch tree; test subprocesses inherit isolation. No shell-wide exports.
+- Source CLI `python -m aiskillsync --version`: `aiskillsync 0.1.40`. An offline, no-build-isolation wheel built from a scratch copy with `/usr/bin/python3 -m pip wheel --no-deps --no-build-isolation --no-index` has package METADATA version `0.1.40`. No package was installed.
+- Review: pending independent review of exact committed diff and focused/full tests. Existing raw-link adoption and concurrent open-writer limitations remain as recorded in `managed-agent-refresh.md`; this parser change does not repair or validate those paths.
+
+## Gates and handoff
+
+- **Integration:** parent must independently review and rerun isolated tests, inspect exact branch tip, and reconcile intended targets before any merge. No merge, push, Hoster writes, installation, or activation was performed or authorized here.
+- **Activation:** separately requires the OMP native loader/model checks and migration safeguards described in the inherited OMP and managed-refresh dossiers; optional OpenCode loader test requires `OPENCODE_TEST_BIN`.
+- **Resume:** inspect `git diff da2c6e8..fix/agent-overlay-parser-compat`, this dossier, and `git status`; confirm branch tip from handoff. Preserve inherited blocked managed-refresh work. The final implementation commit contains all task-owned code, tests, documentation, and this dossier.

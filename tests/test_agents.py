@@ -125,6 +125,22 @@ agent_overlays:
         output = (self.destination / 'reviewer.md').read_text()
         self.assertIn('skill \\\"role: security\\\" name', output)
 
+    def test_omp_rejects_unpaired_surrogate_without_traceback_or_writes(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        text = config_to_text(config_from_mapping(self.raw, self.config))
+        self.config.write_text(text + r'''
+agent_overlays:
+  claude:
+    reviewer:
+      instructions: "do \ud800 not alter"
+''')
+        result = self.cli('agents', '--dest', 'claude')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('surrogate', result.stderr.lower())
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertFalse(self.destination.exists())
+
     def test_omp_rejects_unsupported_double_quoted_escape_without_writes(self):
         self.agent()
         self.raw['agent_formats'] = {'claude': 'omp'}
@@ -169,6 +185,31 @@ agent_overlays:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('single-line', result.stderr + result.stdout)
         self.assertFalse(self.destination.exists())
+
+    def test_omp_rejects_literal_unicode_separator_before_it_can_split_instruction(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        text = config_to_text(config_from_mapping(self.raw, self.config))
+        self.config.write_text(text + '\nagent_overlays:\n  claude:\n    reviewer:\n'
+                               '      instructions: do not\u2028      frontmatter:\u2028        blocking: false\n')
+        result = self.cli('agents', '--dest', 'claude')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_omp_escaped_quote_and_hash_are_not_comments(self):
+        self.agent()
+        self.raw['agent_formats'] = {'claude': 'omp'}
+        text = config_to_text(config_from_mapping(self.raw, self.config))
+        self.config.write_text(text + r'''
+agent_overlays:
+  claude:
+    reviewer:
+      instructions: "Do \" # not\" truncate: this" # actual comment
+''')
+        result = self.cli('agents', '--dest', 'claude')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Do " # not" truncate: this', (self.destination / 'reviewer.md').read_text())
 
     def test_omp_overlay_config_roundtrips_quoted_instructions_and_skill_names(self):
         self.raw['agent_formats'] = {'claude': 'omp'}

@@ -178,11 +178,13 @@ sync:
 ```
 
 The MVP parser supports the simple YAML shape above and intentionally avoids
-external Python packages. Double-quoted scalars accept the JSON-compatible escape
-subset (including `\"`, `\\`, and `\uXXXX`); unsupported escapes are rejected
-rather than passed through. Single-quoted scalars escape an apostrophe by doubling
-it. Overlay instructions and string-list items must each be a single line,
-including no Unicode line separators.
+external Python packages. Existing config fields retain literal backslashes in
+double-quoted scalars. Within `agent_overlays`, double-quoted scalars accept the
+JSON-compatible escape subset (including `\"`, `\\`, and `\uXXXX`); unsupported
+escapes and unpaired surrogates are rejected. Single-quoted scalars escape an
+apostrophe by doubling it. Overlay instructions and string-list items must each
+be a single line; non-ASCII line separators are rejected in the overlay subtree.
+Serialization rejects values or keys that cannot round-trip without changes.
 
 When `--config` is omitted and the default config file is missing, `config`,
 `list`, `doctor`, and `sync` create the parent directories and write this
