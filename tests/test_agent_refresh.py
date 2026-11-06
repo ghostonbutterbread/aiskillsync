@@ -109,13 +109,14 @@ class AgentRefreshTests(unittest.TestCase):
         protected_target = protected / 'reviewer.md'
         protected_target.write_text('protected')
         plan = self.plan(adopt=True)
-        rename = os.rename
+        import aiskillsync.agents as agents
+        rename = agents._rename_noreplace
         def race(src, dst, *args, **kwargs):
             subprocess.run([sys.executable, '-c',
                             'import os,sys; os.rename(sys.argv[1],sys.argv[2]); os.symlink(sys.argv[3],sys.argv[1])',
                             str(self.dest), str(self.root / 'dest-moved'), str(protected)], check=True)
             return rename(src, dst, *args, **kwargs)
-        with patch('aiskillsync.agents.os.rename', side_effect=race):
+        with patch('aiskillsync.agents._rename_noreplace', side_effect=race):
             try:
                 apply_agent_sync_plan(plan)
             except (ValueError, OSError):
@@ -133,6 +134,289 @@ class AgentRefreshTests(unittest.TestCase):
                 self.assertEqual((self.root / 'dest-moved' / 'reviewer.md').read_text(), 'local')
         else:
             self.assertEqual((self.root / 'dest-moved' / 'reviewer.md').read_text(), 'local')
+
+    def test_backup_inside_destination_is_rejected_before_any_mutation(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.write_text('local')
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.root / 'config'), ('src',), ('test',),
+                                     dry_run=False, adopt=True, backup_root=self.dest / 'backup')
+        with self.assertRaisesRegex(ValueError, 'outside destination discovery'):
+            apply_agent_sync_plan(plan)
+        self.assertEqual(target.read_text(), 'local')
+        self.assertFalse((self.dest / 'backup').exists())
+
+    def test_root_swaps_at_each_publication_and_displacement(self):
+        cases = [
+            ('native-create', 'link'), ('raw-create', 'symlink'),
+            ('native-adopt', 'rename'), ('native-adopt', 'link'),
+            ('raw-adopt', 'rename'), ('raw-adopt', 'symlink'),
+            ('legacy-adopt', 'rename'), ('legacy-adopt', 'link'), ('legacy-adopt', 'symlink'),
+            ('refresh', 'rename'), ('refresh', 'link'), ('refresh', 'replace'),
+        ]
+        for mode, operation in cases:
+            with self.subTest(mode=mode, operation=operation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / 'src' / 'agents'
+                source.mkdir(parents=True)
+                agent = source / 'reviewer.md'
+                agent.write_text('---\nname: reviewer\ndescription: Review\n---\nOriginal.\n')
+                protected = root / 'src' / 'skills'
+                protected.mkdir()
+                protected_file = protected / 'reviewer.md'
+                protected_file.write_bytes(b'protected\r\n')
+                dest = root / 'dest'
+                dest.mkdir()
+                raw = {'bridges': [{'name': 'src', 'path': str(source.parent), 'agents_path': 'agents'}],
+                       'ai_agent_paths': {'test': str(dest)},
+                       'sync': {'pull_before_sync': False, 'clone_if_missing': False}}
+                if mode not in ('raw-create', 'raw-adopt'):
+                    raw['agent_formats'] = {'test': 'omp'}
+                def plan(adopt=False):
+                    return build_agent_sync_plan(config_from_mapping(raw, root / 'config'), ('src',), ('test',),
+                                                 dry_run=False, adopt=adopt, backup_root=root / 'backup')
+                target = dest / 'reviewer.md'
+                if mode == 'refresh':
+                    apply_agent_sync_plan(plan())
+                    before = target.read_bytes()
+                    agent.write_text(agent.read_text() + 'update\n')
+                elif mode == 'legacy-adopt':
+                    target.symlink_to(agent)
+                    before = str(agent)
+                elif mode.endswith('adopt'):
+                    target.write_text('local')
+                    before = b'local'
+                else:
+                    before = None
+                proposed = plan(adopt=True)
+                self.assertFalse(proposed.has_blockers, proposed.errors)
+                source_bytes = agent.read_bytes()
+                import aiskillsync.agents as agents
+                original = agents._rename_noreplace if operation == 'rename' else getattr(os, operation)
+                real_rename, real_symlink = os.rename, os.symlink
+                fired = False
+                def swap(*args, **kwargs):
+                    nonlocal fired
+                    if not fired:
+                        fired = True
+                        real_rename(dest, root / 'dest-moved')
+                        real_symlink(protected, dest, target_is_directory=True)
+                    return original(*args, **kwargs)
+                hook = 'aiskillsync.agents._rename_noreplace' if operation == 'rename' else f'aiskillsync.agents.os.{operation}'
+                with patch(hook, side_effect=swap):
+                    with self.assertRaises((ValueError, OSError)):
+                        apply_agent_sync_plan(proposed)
+                self.assertTrue(fired)
+                self.assertEqual(protected_file.read_bytes(), b'protected\r\n')
+                self.assertEqual(list(protected.iterdir()), [protected_file])
+                self.assertEqual(agent.read_bytes(), source_bytes)
+                if before is not None:
+                    snapshot = root / 'backup/agents/test/reviewer.md'
+                    self.assertTrue(snapshot.exists() or snapshot.is_symlink())
+                    if mode == 'legacy-adopt':
+                        self.assertEqual(os.readlink(snapshot), before)
+                    else:
+                        self.assertEqual(snapshot.read_bytes(), before)
+                    receipt = Path(json.loads((snapshot.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+                    self.assertEqual(json.loads(receipt.read_text())['status'], 'incomplete')
+
+    def test_absent_root_swap_at_mkdir_never_creates_inside_source(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        protected = self.root / 'src' / 'skills'
+        protected.mkdir()
+        plan = self.plan()
+        original = os.mkdir
+        real_symlink = os.symlink
+        fired = False
+        def swap(path, *args, **kwargs):
+            nonlocal fired
+            if path == self.dest.name and kwargs.get('dir_fd') is not None and not fired:
+                fired = True
+                real_symlink(protected, self.dest, target_is_directory=True)
+            return original(path, *args, **kwargs)
+        with patch('aiskillsync.agents.os.mkdir', side_effect=swap):
+            with self.assertRaises((OSError, ValueError)):
+                apply_agent_sync_plan(plan)
+        self.assertTrue(fired)
+        self.assertEqual(list(protected.iterdir()), [])
+
+    def test_configured_root_symlink_still_works(self):
+        actual = self.root / 'actual'
+        actual.mkdir()
+        self.dest.symlink_to(actual, target_is_directory=True)
+        apply_agent_sync_plan(self.plan())
+        self.assertEqual((actual / 'reviewer.md').resolve(), self.agent)
+
+    def test_unsupported_fd_operations_fail_before_writes(self):
+        with patch('aiskillsync.agents._SUPPORTS_DIR_FD', False):
+            with self.assertRaisesRegex(OSError, 'descriptor-relative'):
+                apply_agent_sync_plan(self.plan())
+        self.assertFalse(self.dest.exists())
+
+    def test_moving_bound_root_inside_source_before_backup_parent_open(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.dest.mkdir()
+        (self.dest / 'reviewer.md').write_text('local')
+        protected = self.root / 'src' / 'skills'
+        protected.mkdir()
+        plan = self.plan(adopt=True)
+        import aiskillsync.agents as agents
+        real_open_dir, real_validate = agents._open_dir, agents._validate_bound
+        fired = False
+        ready = False
+        validations = 0
+        def validate(*args, **kwargs):
+            nonlocal ready, validations
+            result = real_validate(*args, **kwargs)
+            if args[2] == 'reviewer.md':
+                validations += 1
+                if validations == 2:
+                    ready = True
+            return result
+        def swap(path, *args, **kwargs):
+            nonlocal fired
+            if ready and not fired and path == self.dest.parent:
+                fired = True
+                self.dest.rename(protected / 'moved')
+                self.dest.symlink_to(protected, target_is_directory=True)
+            return real_open_dir(path, *args, **kwargs)
+        with patch('aiskillsync.agents._validate_bound', side_effect=validate), \
+                patch('aiskillsync.agents._open_dir', side_effect=swap):
+            with self.assertRaises((OSError, ValueError)):
+                apply_agent_sync_plan(plan)
+        self.assertTrue(fired)
+        self.assertEqual((protected / 'moved/reviewer.md').read_text(), 'local')
+        self.assertEqual(sorted(p.name for p in protected.iterdir()), ['moved'])
+
+    def test_nested_destination_backup_stays_outside_both_roots(self):
+        outer = self.root / 'outer'
+        self.dest = outer / 'inner'
+        self.dest.mkdir(parents=True)
+        (self.dest / 'reviewer.md').write_text('local')
+        self.raw['ai_agent_paths'] = {'test': str(self.dest), 'outer': str(outer)}
+        self.raw['agent_formats'] = {'test': 'omp'}
+        config = config_from_mapping(self.raw, self.root / 'config')
+        plan = build_agent_sync_plan(config, ('src',), ('test', 'outer'), dry_run=False,
+                                     adopt=True, backup_root=self.backup)
+        apply_agent_sync_plan(plan)
+        snapshot = self.backup / 'agents/test/reviewer.md'
+        receipt = Path(json.loads((snapshot.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        self.assertFalse(receipt.is_relative_to(outer))
+        self.assertEqual(Path(json.loads(receipt.read_text())['displaced']).read_text(), 'local')
+        self.assertEqual(list(outer.glob('.aiskillsync-agent-backup-*')), [])
+
+    def test_backup_parent_swap_cannot_create_in_protected_source(self):
+        import aiskillsync.agents as agents
+        self.dest.mkdir()
+        (self.dest / 'reviewer.md').write_text('local')
+        protected = self.root / 'src' / 'skills'
+        protected.mkdir()
+        actual = self.root / 'backup-actual'
+        actual.mkdir()
+        alias = self.root / 'backup-alias'
+        alias.symlink_to(actual, target_is_directory=True)
+        plan = build_agent_sync_plan(config_from_mapping(self.raw, self.root / 'config'), ('src',), ('test',),
+                                     dry_run=False, adopt=True, backup_root=alias)
+        real_open = agents._open_dir
+        fired = False
+        def swap(path, *args, **kwargs):
+            nonlocal fired
+            if path == actual / 'agents/test' and not fired:
+                fired = True
+                actual.rename(self.root / 'backup-moved')
+                actual.symlink_to(protected, target_is_directory=True)
+            return real_open(path, *args, **kwargs)
+        with patch('aiskillsync.agents._open_dir', side_effect=swap):
+            with self.assertRaises((OSError, ValueError)):
+                apply_agent_sync_plan(plan)
+        self.assertTrue(fired)
+        self.assertEqual(list(protected.iterdir()), [])
+        self.assertEqual((self.dest / 'reviewer.md').read_text(), 'local')
+
+    def test_independent_entry_in_private_displacement_slot_is_not_clobbered(self):
+        self.dest.mkdir()
+        (self.dest / 'reviewer.md').write_text('local')
+        plan = self.plan(adopt=True)
+        import aiskillsync.agents as agents
+        original = agents._rename_noreplace
+        fired = False
+        def race(src, dst, *args, **kwargs):
+            nonlocal fired
+            if dst == 'displaced' and kwargs.get('dst_dir_fd') is not None:
+                fired = True
+                fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+                             dir_fd=kwargs['dst_dir_fd'])
+                os.write(fd, b'independent')
+                os.close(fd)
+            return original(src, dst, *args, **kwargs)
+        with patch('aiskillsync.agents._rename_noreplace', side_effect=race):
+            with self.assertRaises((ValueError, OSError)):
+                apply_agent_sync_plan(plan)
+        self.assertTrue(fired)
+        displaced = list(self.root.glob('.aiskillsync-agent-backup-*/displaced'))
+        self.assertEqual(len(displaced), 1)
+        self.assertEqual(displaced[0].read_bytes(), b'independent')
+        self.assertEqual((self.dest / 'reviewer.md').read_text(), 'local')
+
+    def test_unsupported_exclusive_rename_fails_before_mutation(self):
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.write_text('local')
+        plan = self.plan(adopt=True)
+        with patch('aiskillsync.agents._atomic_rename_primitive', side_effect=OSError('unsupported rename')):
+            with self.assertRaisesRegex(ValueError, 'unsupported rename'):
+                apply_agent_sync_plan(plan)
+        self.assertEqual(target.read_text(), 'local')
+        self.assertFalse(self.backup.exists())
+        self.assertEqual(list(self.root.glob('.aiskillsync-agent-backup-*')), [])
+
+    def test_prior_root_swap_during_later_action_is_incomplete(self):
+        self.dest.mkdir()
+        first = self.dest / 'reviewer.md'
+        first.write_text('first local')
+        second = self.root / 'second'
+        second.mkdir()
+        (second / 'reviewer.md').write_text('second local')
+        protected = self.root / 'src' / 'skills'
+        protected.mkdir()
+        self.raw['ai_agent_paths']['second'] = str(second)
+        config = config_from_mapping(self.raw, self.root / 'config')
+        plan = build_agent_sync_plan(config, ('src',), ('test', 'second'), dry_run=False,
+                                     adopt=True, backup_root=self.backup)
+        real_symlink = os.symlink
+        count = 0
+        def race(*args, **kwargs):
+            nonlocal count
+            count += 1
+            if count == 2:
+                self.dest.rename(self.root / 'dest-moved')
+                real_symlink(protected, self.dest, target_is_directory=True)
+            return real_symlink(*args, **kwargs)
+        with patch('aiskillsync.agents.os.symlink', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                apply_agent_sync_plan(plan)
+        self.assertEqual(list(protected.iterdir()), [])
+        snapshot = self.backup / 'agents/test/reviewer.md'
+        receipt = Path(json.loads((snapshot.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        self.assertEqual(json.loads(receipt.read_text())['status'], 'incomplete')
+        self.assertEqual(snapshot.read_text(), 'first local')
+
+    def test_relocated_bound_root_under_source_at_publication_is_not_written(self):
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.dest.mkdir()
+        protected = self.root / 'src' / 'skills'
+        protected.mkdir()
+        plan = self.plan()
+        real_link = os.link
+        def swap(*args, **kwargs):
+            self.dest.rename(protected / 'moved')
+            self.dest.symlink_to(protected, target_is_directory=True)
+            return real_link(*args, **kwargs)
+        with patch('aiskillsync.agents.os.link', side_effect=swap):
+            with self.assertRaises((ValueError, OSError)):
+                apply_agent_sync_plan(plan)
+        self.assertFalse((protected / 'moved' / 'reviewer.md').exists())
 
     def test_native_refresh_preserves_previous_bytes(self):
         self.raw['agent_formats'] = {'test': 'omp'}
@@ -179,14 +463,15 @@ class AgentRefreshTests(unittest.TestCase):
         target = self.dest / 'reviewer.md'
         target.write_text('original')
         plan = self.plan(adopt=True)
-        real_rename = os.rename
+        import aiskillsync.agents as agents
+        real_rename = agents._rename_noreplace
         def race(src, dst, *args, **kwargs):
-            if Path(src) == target:
+            if Path(src).name == target.name and kwargs.get('src_dir_fd') is not None:
                 replacement = self.root / 'replacement'
                 replacement.write_text('independent')
                 os.replace(replacement, target)
             return real_rename(src, dst, *args, **kwargs)
-        with patch('aiskillsync.agents.os.rename', side_effect=race):
+        with patch('aiskillsync.agents._rename_noreplace', side_effect=race):
             with self.assertRaisesRegex(ValueError, 'incomplete'):
                 apply_agent_sync_plan(plan)
         self.assertEqual((self.backup / 'agents' / 'test' / 'reviewer.md').read_text(), 'original')
@@ -220,7 +505,7 @@ class AgentRefreshTests(unittest.TestCase):
         plan = self.plan(adopt=True)
         link = os.link
         def race(src, dst, *args, **kwargs):
-            if Path(dst) == target:
+            if Path(dst).name == target.name and kwargs.get('dst_dir_fd') is not None:
                 target.write_text('independent')
             return link(src, dst, *args, **kwargs)
         with patch('aiskillsync.agents.os.link', side_effect=race):
@@ -246,10 +531,11 @@ from aiskillsync.config import config_from_mapping
 root=Path(sys.argv[1]); src=root/'src'; dest=root/'dest'
 raw={'bridges':[{'name':'src','path':str(src),'agents_path':'agents'}], 'ai_agent_paths':{'test':str(dest)}, 'sync':{'pull_before_sync':False,'clone_if_missing':False}}
 plan=build_agent_sync_plan(config_from_mapping(raw,root/'config'),('src',),('test',),dry_run=False,adopt=True,backup_root=root/'backup')
-rename=os.rename
-def die(a,b):
-    rename(a,b); os._exit(41)
-os.rename=die
+import aiskillsync.agents as agents
+rename=agents._rename_noreplace
+def die(a,b,*args,**kwargs):
+    rename(a,b,*args,**kwargs); os._exit(41)
+agents._rename_noreplace=die
 apply_agent_sync_plan(plan)
 '''
         proc = subprocess.run([sys.executable, '-c', script, str(self.root)], env=os.environ.copy())

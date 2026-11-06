@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import ctypes
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shutil
+import secrets
 import stat
-import tempfile
+import sys
 from typing import Any
 
 from .config import BridgeConfig, Config, ConfigError, _strip_inline_comment, canonical_path, parse_simple_yaml
@@ -37,6 +39,8 @@ class AgentAction:
     content: str | None = None
     source_digest: str | None = None
     previous_bytes: bytes | None = None
+    root_path: Path | None = None
+    root_identity: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,8 @@ class AgentSyncPlan:
     notices: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     backup_root: Path | None = None
+    source_roots: tuple[Path, ...] = ()
+    source_files: frozenset[Path] = frozenset()
 
     @property
     def has_blockers(self) -> bool:
@@ -359,6 +365,11 @@ def build_agent_sync_plan(
                for source in source_roots):
             errors.append(f"agent destination {destination}: root overlaps configured source directory: {root}")
             continue
+        try:
+            root_identity = _planned_root_identity(root, resolved_root, source_roots, frozenset(source_files))
+        except (OSError, ValueError) as exc:
+            errors.append(f"agent destination {destination}: root path is not a directory or cannot be bound: {root}: {exc}")
+            continue
         conflict = destination_root_conflict(root)
         if conflict:
             errors.append(f"destination {destination}: {conflict}")
@@ -452,10 +463,27 @@ def build_agent_sync_plan(
             if expected_state != _entry_state(path):
                 errors.append(f"agent destination changed during planning: {path}")
                 continue
-            actions.append(AgentAction(destination, path, agent, action, expected_state, content, source_digest, previous_bytes))
+            actions.append(AgentAction(destination, path, agent, action, expected_state, content, source_digest,
+                                       previous_bytes, resolved_root, root_identity))
+        try:
+            if canonical_path(root) != resolved_root or _planned_root_identity(root, resolved_root, source_roots, frozenset(source_files)) != root_identity:
+                errors.append(f"agent destination {destination}: root changed during planning: {root}")
+        except (OSError, ValueError) as exc:
+            errors.append(f"agent destination {destination}: root changed during planning: {root}: {exc}")
     if backup_root is None and any(action.action in {"refresh", "adopt"} for action in actions):
         backup_root = make_backup_root()
-    return AgentSyncPlan(dry_run, tuple(actions), tuple(notices), tuple(errors), backup_root)
+    return AgentSyncPlan(dry_run, tuple(actions), tuple(notices), tuple(errors), backup_root,
+                         source_roots, frozenset(source_files))
+
+
+def _directory_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        raise NotADirectoryError(str(path))
+    return info.st_dev, info.st_ino
 
 
 def _entry_state(path: Path) -> tuple[object, ...]:
@@ -467,138 +495,417 @@ def _entry_state(path: Path) -> tuple[object, ...]:
             str(path.readlink()) if path.is_symlink() else None)
 
 
-def _displace(action: AgentAction, backup: Path) -> Path:
-    """Snapshot separately, then quarantine the actual entry on its filesystem.
 
-    Neither a failed identity check nor a failed publication automatically
-    restores anything: an independent entry may now occupy the pathname.
-    """
-    source = action.path
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    parent = source.parent.parent if source.parent.parent.stat().st_dev == source.parent.stat().st_dev else source.parent
+def _fd_identity(fd: int) -> tuple[int, int]:
+    info = os.fstat(fd)
+    return info.st_dev, info.st_ino
+
+
+_SUPPORTS_DIR_FD = (
+    {os.open, os.mkdir, os.stat, os.rename, os.link, os.symlink, os.unlink,
+     os.readlink, os.rmdir}.issubset(os.supports_dir_fd)
+    and {os.stat, os.link}.issubset(os.supports_follow_symlinks)
+    and os.listdir in os.supports_fd
+)
+
+
+def _open_dir(path: Path, *, create: bool = False,
+              forbidden: set[tuple[int, int]] | None = None) -> int:
+    """Walk an absolute, resolved path without following any replacement symlink."""
+    if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW")) or not _SUPPORTS_DIR_FD:
+        raise OSError("safe descriptor-relative agent operations are unavailable")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(path.anchor, flags)
     try:
-        private = Path(tempfile.mkdtemp(prefix=".aiskillsync-agent-backup-", dir=parent))
-    except PermissionError:
-        if parent == source.parent:
-            raise
-        private = Path(tempfile.mkdtemp(prefix=".aiskillsync-agent-backup-", dir=source.parent))
-    displaced = private / "displaced"
-    receipt = private / "receipt.json"
-    receipt.write_text(json.dumps({"status": "incomplete", "target": str(source),
-                                   "snapshot": str(backup), "displaced": str(displaced)}, indent=2) + "\n")
-    with (backup.parent / (backup.name + ".receipt.json")).open("x", encoding="utf-8") as index:
-        json.dump({"receipt": str(receipt)}, index)
-    if source.is_symlink():
-        backup.symlink_to(source.readlink())
-    elif source.is_dir():
-        shutil.copytree(source, backup, symlinks=True)
-    elif source.is_file():
-        with source.open("rb") as src, backup.open("xb") as dst:
-            shutil.copyfileobj(src, dst)
-        shutil.copystat(source, backup)
+        for part in path.parts[1:]:
+            try:
+                child = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                if forbidden and _ancestors(fd) & forbidden:
+                    raise ValueError(f"cannot create directory inside a configured source: {path}")
+                os.mkdir(part, 0o777, dir_fd=fd)
+                child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _ancestors(fd: int) -> set[tuple[int, int]]:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current = os.dup(fd)
+    result = set()
+    try:
+        while True:
+            identity = _fd_identity(current)
+            result.add(identity)
+            parent = os.open('..', flags, dir_fd=current)
+            if _fd_identity(parent) == identity:
+                os.close(parent)
+                return result
+            os.close(current)
+            current = parent
+    finally:
+        os.close(current)
+
+
+def _validate_bound(fd: int, plan: AgentSyncPlan, target_name: str | None = None,
+                    protected_fds: tuple[int, ...] = ()) -> None:
+    """Check the opened directory, not merely its potentially replaced pathname."""
+    identity = _fd_identity(fd)
+    ancestors = _ancestors(fd)
+    for source_fd in protected_fds:
+        if _fd_identity(source_fd) in ancestors or identity in _ancestors(source_fd):
+            raise ValueError("agent directory overlaps a bound configured source")
+    for source in plan.source_roots:
+        try:
+            source_fd = _open_dir(source)
+        except FileNotFoundError:
+            continue
+        try:
+            if _fd_identity(source_fd) in ancestors or identity in _ancestors(source_fd):
+                raise ValueError(f"agent directory overlaps configured source: {source}")
+        finally:
+            os.close(source_fd)
+    if target_name is not None:
+        for source in plan.source_files:
+            if source.name != target_name:
+                continue
+            try:
+                info = source.parent.stat()
+            except FileNotFoundError:
+                continue
+            if (info.st_dev, info.st_ino) == identity:
+                raise ValueError(f"agent destination would replace a source entry: {source}")
+
+
+def _planned_root_identity(root: Path, resolved: Path, source_roots: tuple[Path, ...],
+                           source_files: frozenset[Path]) -> tuple[int, int] | None:
+    identity = _directory_identity(root)
+    if identity is None:
+        return None
+    fd = _open_dir(resolved)
+    try:
+        bound = _fd_identity(fd)
+        if bound != identity or canonical_path(root) != resolved:
+            raise ValueError(f"agent destination root changed during binding: {root}")
+        _validate_bound(fd, AgentSyncPlan(False, source_roots=source_roots, source_files=source_files))
+        return bound
+    finally:
+        os.close(fd)
+
+
+def _entry_at(fd: int, name: str) -> tuple[object, ...]:
+    try:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return ("missing",)
+    link = os.readlink(name, dir_fd=fd) if stat.S_ISLNK(info.st_mode) else None
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, link)
+
+
+def _bytes_at(fd: int, name: str) -> bytes:
+    file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    try:
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"not a regular file: {name}")
+        with os.fdopen(file_fd, 'rb', closefd=False) as stream:
+            data = stream.read()
+        after = os.fstat(file_fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError(f"file changed while reading: {name}")
+        return data
+    finally:
+        os.close(file_fd)
+
+
+def _write_exclusive(fd: int, name: str, data: bytes) -> None:
+    file_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+    with os.fdopen(file_fd, 'wb') as stream:
+        stream.write(data)
+
+
+def _snapshot(src_fd: int, name: str, dst_fd: int, dst_name: str) -> None:
+    info = os.stat(name, dir_fd=src_fd, follow_symlinks=False)
+    if stat.S_ISLNK(info.st_mode):
+        os.symlink(os.readlink(name, dir_fd=src_fd), dst_name, dir_fd=dst_fd)
+    elif stat.S_ISREG(info.st_mode):
+        _write_exclusive(dst_fd, dst_name, _bytes_at(src_fd, name))
+    elif stat.S_ISDIR(info.st_mode):
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        child_src = os.open(name, flags, dir_fd=src_fd)
+        try:
+            os.mkdir(dst_name, 0o700, dir_fd=dst_fd)
+            child_dst = os.open(dst_name, flags, dir_fd=dst_fd)
+            try:
+                for child in os.listdir(child_src):
+                    _snapshot(child_src, child, child_dst, child)
+            finally:
+                os.close(child_dst)
+        finally:
+            os.close(child_src)
     else:
-        raise ValueError(f"unsupported agent destination type: {source}; receipt: {receipt}")
-    if _entry_state(source) != action.expected_state:
-        raise ValueError(f"agent destination changed during snapshot: {source}; receipt: {receipt}")
-    if action.previous_bytes is not None and backup.read_bytes() != action.previous_bytes:
-        raise ValueError(f"agent destination bytes changed during snapshot: {source}; receipt: {receipt}")
-    # The destination is inside a newly-created private directory on the same
-    # filesystem, so rename cannot replace another pathname entry there.
-    os.rename(source, displaced)
-    if _entry_state(displaced) != action.expected_state:
-        raise ValueError(f"agent destination changed at displacement: {source}; receipt: {receipt}")
-    if displaced.is_file() and not displaced.is_symlink() and displaced.read_bytes() != backup.read_bytes():
-        raise ValueError(f"agent destination changed during displacement: {source}; receipt: {receipt}")
-    return private
+        raise ValueError(f"unsupported agent destination type: {name}")
+
+
+def _atomic_rename_primitive():
+    """Return an exclusive fd-relative rename, or fail closed on unsupported OSes."""
+    if sys.platform.startswith('linux'):
+        name, flag = 'renameat2', 1  # RENAME_NOREPLACE
+    elif sys.platform == 'darwin':
+        name, flag = 'renameatx_np', 4  # RENAME_EXCL
+    else:
+        raise OSError(errno.ENOTSUP, 'exclusive agent displacement is unavailable')
+    try:
+        function = getattr(ctypes.CDLL(None, use_errno=True), name)
+    except AttributeError as exc:
+        raise OSError(errno.ENOTSUP, 'exclusive agent displacement is unavailable') from exc
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    return function, flag
+
+
+def _rename_noreplace(src: str, dst: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:
+    function, flag = _atomic_rename_primitive()
+    if function(src_dir_fd, os.fsencode(src), dst_dir_fd, os.fsencode(dst), flag) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), dst)
+
+
+def _private_dir(parent_fd: int, prefix: str) -> tuple[str, int]:
+    for _ in range(32):
+        name = prefix + secrets.token_hex(12)
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        return name, os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    raise OSError("cannot allocate private agent directory")
+
+
+def _assert_root(action: AgentAction, root_fd: int) -> None:
+    try:
+        current = _directory_identity(action.path.parent)
+    except OSError as exc:
+        raise ValueError(f"agent destination root changed: {action.path.parent}") from exc
+    if current != _fd_identity(root_fd) or canonical_path(action.path.parent) != action.root_path:
+        raise ValueError(f"agent destination root changed: {action.path.parent}")
+
+
+def _receipt(status: str, action: AgentAction, backup: Path, displaced: Path) -> bytes:
+    return (json.dumps({'status': status, 'target': str(action.path), 'snapshot': str(backup),
+                        'displaced': str(displaced)}, indent=2) + '\n').encode()
 
 
 def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
-    """Apply a non-blocked file projection; a dry-run plan cannot write."""
+    """Bind each destination and mutate only through its validated directory fd."""
     if plan.has_blockers:
-        raise ValueError("cannot apply an agent sync plan with blockers")
+        raise ValueError('cannot apply an agent sync plan with blockers')
     if plan.dry_run:
         return ()
-    seen: set[Path] = set()
-    for action in plan.actions:
-        path = canonical_path(action.path.parent) / action.path.name
-        if path in seen:
-            raise ValueError(f"duplicate agent destination action path: {path}")
-        seen.add(path)
-        conflict = destination_root_conflict(action.path.parent)
-        if conflict:
-            raise ValueError(conflict)
-        if _entry_state(action.path) != action.expected_state:
-            raise ValueError(f"agent destination changed before apply: {action.path}")
-        error = configured_branch_error(action.agent.bridge)
-        if error:
-            raise ValueError(error)
-        if not action.agent.path.is_file():
-            raise ValueError(f"agent source missing before apply: {action.agent.path}")
-        if action.source_digest is not None and hashlib.sha256(action.agent.path.read_bytes()).hexdigest() != action.source_digest:
-            raise ValueError(f"agent source changed before apply: {action.agent.path}")
-    adoptions = tuple(action for action in plan.actions if action.action in {"adopt", "refresh"})
-    if adoptions and plan.backup_root is None:
-        raise ValueError("agent adoption requires a backup root")
-    for action in adoptions:
-        assert plan.backup_root is not None
-        backup = plan.backup_root / "agents" / action.destination / action.path.name
-        index = backup.parent / (backup.name + ".receipt.json")
-        if backup.exists() or backup.is_symlink() or index.exists() or index.is_symlink():
-            raise ValueError(f"agent backup already exists: {backup}")
+    roots: dict[Path, int] = {}
+    protected_fds: list[int] = []
+    protected_ids: set[tuple[int, int]] = set()
+    backup_parents: dict[Path, Path] = {}
+    receipts: list[tuple[int, AgentAction, Path, Path]] = []
+    finalized: list[tuple[int, AgentAction, Path, Path]] = []
     created: list[str] = []
     completed: list[Path] = []
+    adoptions = tuple(a for a in plan.actions if a.action in {'adopt', 'refresh'})
     try:
-        for action in plan.actions:
-            if action.action == "skip":
+        if adoptions:
+            _atomic_rename_primitive()
+        for source in plan.source_roots:
+            try:
+                source_fd = _open_dir(source)
+            except FileNotFoundError:
                 continue
-            if _entry_state(action.path) != action.expected_state:
-                raise ValueError(f"agent destination changed before apply: {action.path}")
+            protected_fds.append(source_fd)
+            protected_ids.add(_fd_identity(source_fd))
+        seen: set[tuple[Path, str]] = set()
+        # Preflight all entries before creating anything.
+        for action in plan.actions:
+            assert action.root_path is not None
+            key = (action.root_path, action.path.name)
+            if key in seen:
+                raise ValueError(f'duplicate agent destination action path: {action.path}')
+            seen.add(key)
+            if canonical_path(action.path.parent) != action.root_path:
+                raise ValueError(f'agent destination root changed before apply: {action.path.parent}')
+            current = _directory_identity(action.path.parent)
+            if current != action.root_identity:
+                raise ValueError(f'agent destination root changed before apply: {action.path.parent}')
+            if current is not None:
+                if action.root_path not in roots:
+                    roots[action.root_path] = _open_dir(action.root_path)
+                root_fd = roots[action.root_path]
+                if _fd_identity(root_fd) != current:
+                    raise ValueError(f'agent destination root changed before apply: {action.path.parent}')
+                _validate_bound(root_fd, plan, action.path.name, tuple(protected_fds))
+                _assert_root(action, root_fd)
+                if _entry_at(root_fd, action.path.name) != action.expected_state:
+                    raise ValueError(f'agent destination changed before apply: {action.path}')
+            elif action.expected_state != ('missing',):
+                raise ValueError(f'agent destination changed before apply: {action.path}')
+            error = configured_branch_error(action.agent.bridge)
+            if error:
+                raise ValueError(error)
+            if not action.agent.path.is_file():
+                raise ValueError(f'agent source missing before apply: {action.agent.path}')
             if action.source_digest is not None and hashlib.sha256(action.agent.path.read_bytes()).hexdigest() != action.source_digest:
-                raise ValueError(f"agent source changed before apply: {action.agent.path}")
-            action.path.parent.mkdir(parents=True, exist_ok=True)
-            private = None
+                raise ValueError(f'agent source changed before apply: {action.agent.path}')
+        if adoptions and plan.backup_root is None:
+            raise ValueError('agent adoption requires a backup root')
+        for action in adoptions:
+            assert plan.backup_root is not None
+            backup = plan.backup_root / 'agents' / action.destination / action.path.name
+            backup_parents[backup] = canonical_path(backup.parent)
+            candidate = backup_parents[backup] / backup.name
+            if any(candidate.is_relative_to(s) or s.is_relative_to(candidate) for s in plan.source_roots) or candidate in plan.source_files:
+                raise ValueError(f'agent backup overlaps configured source: {backup}')
+            if any(candidate.is_relative_to(a.root_path) for a in plan.actions if a.root_path is not None):
+                raise ValueError(f'agent backup must be outside destination discovery: {backup}')
+            index = backup.parent / (backup.name + '.receipt.json')
+            if backup.exists() or backup.is_symlink() or index.exists() or index.is_symlink():
+                raise ValueError(f'agent backup already exists: {backup}')
+        for action in plan.actions:
+            if action.action == 'skip':
+                continue
+            assert action.root_path is not None
+            if action.root_path not in roots:
+                # An entry created by somebody else since planning is not ours.
+                if _directory_identity(action.path.parent) is not None:
+                    raise ValueError(f'agent destination root changed before apply: {action.path.parent}')
+                roots[action.root_path] = _open_dir(action.root_path, create=True, forbidden=protected_ids)
+            root_fd = roots[action.root_path]
+            _validate_bound(root_fd, plan, action.path.name, tuple(protected_fds))
+            _assert_root(action, root_fd)
+            if _entry_at(root_fd, action.path.name) != action.expected_state:
+                raise ValueError(f'agent destination changed before apply: {action.path}')
+            if action.source_digest is not None and hashlib.sha256(action.agent.path.read_bytes()).hexdigest() != action.source_digest:
+                raise ValueError(f'agent source changed before apply: {action.agent.path}')
+            private_fd = None
+            parent_fd = None
+            backup_fd = None
+            private_path = None
             backup = None
-            if action.action in {"adopt", "refresh"}:
-                assert plan.backup_root is not None
-                backup = plan.backup_root / "agents" / action.destination / action.path.name
-                private = _displace(action, backup)
-            if action.content is not None:
-                if private is None and _entry_state(action.path) != action.expected_state:
-                    raise ValueError(f"agent destination changed before apply: {action.path}")
-                temp_dir = private or Path(tempfile.mkdtemp(prefix=".aiskillsync-agent-write-", dir=action.path.parent))
-                fd, temp_name = tempfile.mkstemp(prefix="prepared-", dir=temp_dir)
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                        handle.write(action.content)
-                    if action.action in {"write", "adopt", "refresh"}:
-                        # Hard-link create refuses a concurrently created destination.
-                        os.link(temp_name, action.path)
-                        completed.append(action.path)
-                        if hashlib.sha256(action.agent.path.read_bytes()).hexdigest() != action.source_digest:
-                            raise ValueError(f"agent source changed during apply: {action.agent.path}")
-                        os.unlink(temp_name)
-                    else:
-                        raise ValueError(f"unsupported native action: {action.action}")
-                finally:
-                    if os.path.exists(temp_name):
-                        os.unlink(temp_name)
-                    if private is None:
-                        temp_dir.rmdir()
-            else:
-                action.path.symlink_to(action.agent.path)
-                completed.append(action.path)
-            if private is not None:
-                assert backup is not None
-                receipt = private / "receipt.json"
-                complete = private / "receipt-complete.json"
-                complete.write_text(json.dumps({"status": "complete", "target": str(action.path),
-                                                "snapshot": str(backup), "displaced": str(private / 'displaced')}, indent=2) + "\n")
-                os.replace(complete, receipt)
-            created.append(f"{action.destination}:{action.agent.name}")
+            try:
+                if action.action in {'adopt', 'refresh'}:
+                    assert plan.backup_root is not None
+                    backup = plan.backup_root / 'agents' / action.destination / action.path.name
+                    # Bind the planned parent independently. Following '..' from
+                    # the destination fd could instead reach a protected tree
+                    # if the directory was moved after the previous check.
+                    parent_path = action.root_path.parent
+                    while any(parent_path.is_relative_to(a.root_path)
+                              for a in plan.actions if a.root_path is not None):
+                        if parent_path == parent_path.parent:
+                            raise ValueError('cannot place agent backup outside destination discovery')
+                        parent_path = parent_path.parent
+                    parent_fd = _open_dir(parent_path)
+                    if _ancestors(parent_fd) & protected_ids:
+                        raise ValueError(f'agent backup parent overlaps a configured source: {parent_path}')
+                    if _fd_identity(parent_fd)[0] != _fd_identity(root_fd)[0]:
+                        raise ValueError(f'cannot place a same-filesystem agent backup outside destination: {action.path.parent}')
+                    private_name, private_fd = _private_dir(parent_fd, '.aiskillsync-agent-backup-')
+                    private_path = parent_path / private_name
+                    displaced = private_path / 'displaced'
+                    _write_exclusive(private_fd, 'receipt.json', _receipt('incomplete', action, backup, displaced))
+                    _assert_root(action, root_fd)
+                    backup_fd = _open_dir(backup_parents[backup], create=True, forbidden=protected_ids)
+                    _validate_bound(backup_fd, plan, backup.name, tuple(protected_fds))
+                    _validate_bound(backup_fd, plan, backup.name + '.receipt.json', tuple(protected_fds))
+                    _write_exclusive(backup_fd, backup.name + '.receipt.json', json.dumps({'receipt': str(private_path / 'receipt.json')}).encode())
+                    _snapshot(root_fd, action.path.name, backup_fd, backup.name)
+                    if _entry_at(root_fd, action.path.name) != action.expected_state:
+                        raise ValueError(f'agent destination changed during snapshot: {action.path}; receipt: {private_path / "receipt.json"}')
+                    if action.previous_bytes is not None and _bytes_at(backup_fd, backup.name) != action.previous_bytes:
+                        raise ValueError(f'agent destination bytes changed during snapshot: {action.path}')
+                    _assert_root(action, root_fd)
+                    _rename_noreplace(action.path.name, 'displaced', src_dir_fd=root_fd, dst_dir_fd=private_fd)
+                    if _entry_at(private_fd, 'displaced') != action.expected_state:
+                        raise ValueError(f'agent destination changed at displacement: {action.path}; receipt: {private_path / "receipt.json"}')
+                    if action.previous_bytes is not None and _bytes_at(private_fd, 'displaced') != action.previous_bytes:
+                        raise ValueError(f'agent destination changed during displacement: {action.path}')
+                    _assert_root(action, root_fd)
+                if action.content is not None:
+                    if private_fd is None:
+                        parent_fd = os.dup(root_fd)
+                        private_name, private_fd = _private_dir(parent_fd, '.aiskillsync-agent-write-')
+                    _write_exclusive(private_fd, 'prepared', action.content.encode('utf-8'))
+                    os.link('prepared', action.path.name, src_dir_fd=private_fd, dst_dir_fd=root_fd, follow_symlinks=False)
+                    completed.append(action.path)
+                    _assert_root(action, root_fd)
+                    if hashlib.sha256(action.agent.path.read_bytes()).hexdigest() != action.source_digest:
+                        raise ValueError(f'agent source changed during apply: {action.agent.path}')
+                    os.unlink('prepared', dir_fd=private_fd)
+                else:
+                    os.symlink(str(action.agent.path), action.path.name, dir_fd=root_fd)
+                    completed.append(action.path)
+                    _assert_root(action, root_fd)
+                if backup is not None:
+                    assert private_fd is not None and private_path is not None
+                    # Keep receipts incomplete until all destination roots have
+                    # survived all actions, including actions at other roots.
+                    receipts.append((os.dup(private_fd), action, backup, private_path))
+                created.append(f'{action.destination}:{action.agent.name}')
+            finally:
+                if backup_fd is not None:
+                    os.close(backup_fd)
+                if private_fd is not None:
+                    if backup is None:
+                        try:
+                            os.unlink('prepared', dir_fd=private_fd)
+                        except FileNotFoundError:
+                            pass
+                    os.close(private_fd)
+                    if backup is None and parent_fd is not None:
+                        os.rmdir(private_name, dir_fd=parent_fd)
+                if parent_fd is not None:
+                    os.close(parent_fd)
+        def verify_roots() -> None:
+            for item in plan.actions:
+                assert item.root_path is not None
+                if item.root_path in roots:
+                    _assert_root(item, roots[item.root_path])
+
+        verify_roots()
+        for record in receipts:
+            receipt_fd, item, backup, private_path = record
+            _write_exclusive(receipt_fd, 'receipt-complete.json',
+                             _receipt('complete', item, backup, private_path / 'displaced'))
+            verify_roots()
+            os.replace('receipt-complete.json', 'receipt.json', src_dir_fd=receipt_fd, dst_dir_fd=receipt_fd)
+            finalized.append(record)
+            verify_roots()
+        verify_roots()
+        return tuple(created)
     except (OSError, ValueError) as exc:
+        receipt_errors = []
+        for receipt_fd, item, backup, private_path in finalized:
+            try:
+                name = 'receipt-incomplete-' + secrets.token_hex(8) + '.json'
+                _write_exclusive(receipt_fd, name, _receipt('incomplete', item, backup, private_path / 'displaced'))
+                os.replace(name, 'receipt.json', src_dir_fd=receipt_fd, dst_dir_fd=receipt_fd)
+            except OSError as receipt_exc:
+                receipt_errors.append(f'{private_path / "receipt.json"}: {receipt_exc}')
+        if receipt_errors:
+            exc = ValueError(f'{exc}; failed to mark receipts incomplete: {"; ".join(receipt_errors)}')
         if completed or (adoptions and plan.backup_root):
-            paths = ", ".join(str(path) for path in completed)
-            backup = f"; adoption backups: {plan.backup_root / 'agents'}" if adoptions and plan.backup_root else ""
-            raise ValueError(f"agent apply incomplete after writing [{paths}]{backup}; stop consumers and inspect these paths, preserve concurrent edits, and manually reconcile or restore backups before retrying: {exc}") from exc
+            paths = ', '.join(str(path) for path in completed)
+            backup_note = f'; adoption backups: {plan.backup_root / "agents"}' if adoptions and plan.backup_root else ''
+            raise ValueError(f'agent apply incomplete after writing [{paths}]{backup_note}; stop consumers and inspect these paths, preserve concurrent edits, and manually reconcile or restore backups before retrying: {exc}') from exc
         raise
-    return tuple(created)
+    finally:
+        for fd in roots.values():
+            os.close(fd)
+        for fd in protected_fds:
+            os.close(fd)
+        for receipt_fd, _, _, _ in receipts:
+            os.close(receipt_fd)

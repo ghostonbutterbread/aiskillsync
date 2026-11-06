@@ -431,9 +431,13 @@ can still modify the displaced inode after success, and no post-return change
 detection is claimed. Preserve both artifacts when reconciling. Symlink
 snapshots preserve link text, not target contents; directory snapshots are
 non-atomic copies, while the displaced directory retains its original entries.
-Ensure your consumer does not recursively discover private backup directories:
-they are normally siblings of the agent root, but fall back to a hidden
-subdirectory of it when required by filesystem boundaries or permissions.
+Backups are kept outside selected agent discovery roots. Adoption and refresh
+require a writable same-filesystem location outside those roots for the private
+displaced inode; if one is unavailable (for example, the agent root is a mount
+point), the operation fails rather than placing a backup under discovery. The
+recovery-index directory must likewise be outside the selected agent roots.
+Platforms without the necessary descriptor-relative filesystem operations fail
+closed rather than using unsafe pathname-based writes.
 
 Publication is no-clobber. A concurrently replaced entry may be quarantined,
 but is not deleted; a newly created destination blocks publication. Applies are

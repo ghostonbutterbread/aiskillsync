@@ -376,12 +376,13 @@ agent_overlays:
         plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",),
                                      dry_run=False, adopt=True, backup_root=backup)
         saved = backup / "agents" / "claude" / "reviewer.md"
-        real_open = Path.open
-        def race(path, *args, **kwargs):
-            if path == saved and args and args[0] == 'xb':
+        import aiskillsync.agents as agents
+        real_write = agents._write_exclusive
+        def race(fd, name, data):
+            if name == saved.name:
                 saved.write_text("concurrent backup")
-            return real_open(path, *args, **kwargs)
-        with patch.object(Path, "open", race):
+            return real_write(fd, name, data)
+        with patch("aiskillsync.agents._write_exclusive", side_effect=race):
             with self.assertRaisesRegex(ValueError, "incomplete.*backup"):
                 apply_agent_sync_plan(plan)
         self.assertEqual(saved.read_text(), "concurrent backup")
@@ -471,9 +472,9 @@ agent_overlays:
         config = config_from_mapping(self.raw, self.config)
         plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
         real_link = os.link
-        def race(src, dst):
-            Path(dst).write_text("concurrent local edit")
-            return real_link(src, dst)
+        def race(src, dst, *args, **kwargs):
+            (self.destination / dst).write_text("concurrent local edit")
+            return real_link(src, dst, *args, **kwargs)
         with patch("aiskillsync.agents.os.link", side_effect=race):
             with self.assertRaises(FileExistsError):
                 apply_agent_sync_plan(plan)
@@ -486,10 +487,10 @@ agent_overlays:
         config = config_from_mapping(self.raw, self.config)
         plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False)
         real_link = os.link
-        def fail_second(src, dst):
+        def fail_second(src, dst, *args, **kwargs):
             if Path(dst).name == "second.md":
                 raise OSError("injected failure")
-            return real_link(src, dst)
+            return real_link(src, dst, *args, **kwargs)
         with patch("aiskillsync.agents.os.link", side_effect=fail_second):
             with self.assertRaisesRegex(ValueError, "incomplete.*reviewer.md.*injected failure"):
                 apply_agent_sync_plan(plan)
@@ -576,7 +577,7 @@ agent_overlays:
         config = config_from_mapping(self.raw, self.config)
         plan = build_agent_sync_plan(config, ("bbh",), ("claude",), dry_run=False,
                                      adopt=True, backup_root=backup)
-        with patch.object(Path, "symlink_to", side_effect=OSError("injected failure")):
+        with patch("aiskillsync.agents.os.symlink", side_effect=OSError("injected failure")):
             with self.assertRaisesRegex(ValueError, "adoption backups:.*backups/agents"):
                 apply_agent_sync_plan(plan)
         self.assertFalse(target.exists())
