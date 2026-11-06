@@ -402,11 +402,14 @@ class AgentRefreshTests(unittest.TestCase):
         self.assertEqual(json.loads(receipt.read_text())['status'], 'incomplete')
         self.assertEqual(snapshot.read_text(), 'first local')
 
-    def test_relocated_bound_root_under_source_at_publication_is_not_written(self):
+    def test_reparented_root_at_publication_reports_actual_partial_write(self):
         self.raw['agent_formats'] = {'test': 'omp'}
         self.dest.mkdir()
         protected = self.root / 'src' / 'skills'
         protected.mkdir()
+        sentinel = protected / 'reviewer.md'
+        sentinel.write_text('protected')
+        source_bytes = self.agent.read_bytes()
         plan = self.plan()
         real_link = os.link
         def swap(*args, **kwargs):
@@ -414,9 +417,96 @@ class AgentRefreshTests(unittest.TestCase):
             self.dest.symlink_to(protected, target_is_directory=True)
             return real_link(*args, **kwargs)
         with patch('aiskillsync.agents.os.link', side_effect=swap):
-            with self.assertRaises((ValueError, OSError)):
+            with self.assertRaisesRegex(ValueError, 'incomplete') as caught:
                 apply_agent_sync_plan(plan)
+        self.assertIn('bound directory', str(caught.exception))
+        if sys.platform.startswith('linux') and Path('/proc/self/fd').is_dir():
+            self.assertIn(str(protected / 'moved'), str(caught.exception))
+        self.assertEqual(sentinel.read_text(), 'protected')
+        self.assertEqual(self.agent.read_bytes(), source_bytes)
+        self.assertIn('Original.', (protected / 'moved' / 'reviewer.md').read_text())
+
+    def test_reparent_after_displacement_retains_both_originals_and_reports_location(self):
+        import aiskillsync.agents as agents
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.dest.mkdir()
+        (self.dest / 'reviewer.md').write_text('local')
+        protected = self.root / 'src' / 'skills'
+        protected.mkdir()
+        sentinel = protected / 'reviewer.md'
+        sentinel.write_text('protected')
+        source_bytes = self.agent.read_bytes()
+        plan = self.plan(adopt=True)
+        real_rename = agents._rename_noreplace
+        def swap(*args, **kwargs):
+            result = real_rename(*args, **kwargs)
+            self.dest.rename(protected / 'moved')
+            self.dest.symlink_to(protected, target_is_directory=True)
+            return result
+        with patch('aiskillsync.agents._rename_noreplace', side_effect=swap):
+            with self.assertRaisesRegex(ValueError, 'incomplete') as caught:
+                apply_agent_sync_plan(plan)
+        self.assertIn('bound directory', str(caught.exception))
+        if sys.platform.startswith('linux') and Path('/proc/self/fd').is_dir():
+            self.assertIn(str(protected / 'moved'), str(caught.exception))
+        self.assertEqual(sentinel.read_text(), 'protected')
+        self.assertEqual(self.agent.read_bytes(), source_bytes)
         self.assertFalse((protected / 'moved' / 'reviewer.md').exists())
+        snapshot = self.backup / 'agents/test/reviewer.md'
+        receipt = Path(json.loads((snapshot.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data['status'], 'incomplete')
+        self.assertEqual(snapshot.read_text(), 'local')
+        self.assertEqual(Path(data['displaced']).read_text(), 'local')
+
+    def test_reparent_after_adoption_publish_preserves_receipt_and_closes_root_fd(self):
+        import aiskillsync.agents as agents
+        self.raw['agent_formats'] = {'test': 'omp'}
+        self.dest.mkdir()
+        (self.dest / 'reviewer.md').write_text('local')
+        protected = self.root / 'src' / 'skills'
+        protected.mkdir()
+        sentinel = protected / 'reviewer.md'
+        sentinel.write_text('protected')
+        plan = self.plan(adopt=True)
+        real_link, real_assert = os.link, agents._assert_root
+        root_fds = set()
+        def track(action, fd):
+            root_fds.add(fd)
+            return real_assert(action, fd)
+        def swap(*args, **kwargs):
+            result = real_link(*args, **kwargs)
+            self.dest.rename(protected / 'moved')
+            self.dest.symlink_to(protected, target_is_directory=True)
+            return result
+        with patch('aiskillsync.agents._assert_root', side_effect=track), \
+                patch('aiskillsync.agents.os.link', side_effect=swap):
+            with self.assertRaisesRegex(ValueError, 'incomplete') as caught:
+                apply_agent_sync_plan(plan)
+        self.assertIn('bound directory', str(caught.exception))
+        self.assertEqual(sentinel.read_text(), 'protected')
+        self.assertIn('Original.', (protected / 'moved' / 'reviewer.md').read_text())
+        snapshot = self.backup / 'agents/test/reviewer.md'
+        receipt = Path(json.loads((snapshot.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data['status'], 'incomplete')
+        self.assertEqual(snapshot.read_text(), 'local')
+        self.assertEqual(Path(data['displaced']).read_text(), 'local')
+        self.assertTrue(root_fds)
+        for fd in root_fds:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def test_bound_directory_diagnostic_when_location_unavailable(self):
+        from aiskillsync.agents import _bound_location
+        fd = os.open(self.source, os.O_RDONLY)
+        try:
+            with patch('aiskillsync.agents.os.readlink', side_effect=OSError('unavailable')):
+                message = _bound_location(fd)
+            self.assertIn('current location unknown', message)
+            self.assertIn(f'inode={os.fstat(fd).st_ino}', message)
+        finally:
+            os.close(fd)
 
     def test_native_refresh_preserves_previous_bytes(self):
         self.raw['agent_formats'] = {'test': 'omp'}

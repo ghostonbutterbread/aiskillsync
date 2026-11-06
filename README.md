@@ -412,7 +412,14 @@ projection, or unexpected symlink blocks unless explicitly adopted with
 `--adopt`. Adoption saves data but does **not** reconcile safety fields or
 distinct prompts: inspect the differences first. `sync all --overwrite` is not
 authorization to adopt native conflicts. Destination and source agent roots
-must not overlap, including through symlinks.
+must not overlap, including through symlinks. Operators must prevent concurrent
+reparenting or renaming of configured source and destination roots while sync
+is running. Directory descriptors prevent following a replacement root symlink,
+but cannot prevent a write to a bound directory inode after another process moves
+that directory underneath a source. If detected, sync reports an incomplete
+apply; the newly published entry may exist inside the moved directory. Existing
+protected source entries must not be overwritten or deleted. Stop consumers and
+locate the moved directory and recovery artifacts before reconciling.
 
 A source removal, malformed source, rename or format change blocks on
 identifiable stale managed files; review and retire them manually rather than
@@ -442,7 +449,10 @@ closed rather than using unsafe pathname-based writes.
 Publication is no-clobber. A concurrently replaced entry may be quarantined,
 but is not deleted; a newly created destination blocks publication. Applies are
 not transactional. Source changes detected after publication and other caught
-failures report installed paths and the recovery index. An abrupt process exit
+failures report configured targets and the recovery index; those configured
+paths may no longer identify the written entries. When a changed destination root
+is detected, the error includes its bound device and inode and, when available,
+an observed location that may already have changed again. An abrupt process exit
 can leave an incomplete receipt and absent or already-published destination;
 inspect the index and full destination before restarting. Never automatically
 overwrite a destination to restore: stop consumers, preserve every current entry,

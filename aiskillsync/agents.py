@@ -689,13 +689,25 @@ def _private_dir(parent_fd: int, prefix: str) -> tuple[str, int]:
     raise OSError("cannot allocate private agent directory")
 
 
+def _bound_location(fd: int) -> str:
+    """Describe a bound inode without claiming its location is stable."""
+    device, inode = _fd_identity(fd)
+    try:
+        location = os.readlink(f'/proc/self/fd/{fd}') if sys.platform.startswith('linux') else None
+    except OSError:
+        location = None
+    observed = f'observed at {location!r} (may have moved again)' if location else 'current location unknown'
+    return f'bound directory device={device} inode={inode}, {observed}'
+
+
 def _assert_root(action: AgentAction, root_fd: int) -> None:
     try:
         current = _directory_identity(action.path.parent)
+        unchanged = current == _fd_identity(root_fd) and canonical_path(action.path.parent) == action.root_path
     except OSError as exc:
-        raise ValueError(f"agent destination root changed: {action.path.parent}") from exc
-    if current != _fd_identity(root_fd) or canonical_path(action.path.parent) != action.root_path:
-        raise ValueError(f"agent destination root changed: {action.path.parent}")
+        raise ValueError(f"agent destination root changed: {action.path.parent}; {_bound_location(root_fd)}") from exc
+    if not unchanged:
+        raise ValueError(f"agent destination root changed: {action.path.parent}; {_bound_location(root_fd)}")
 
 
 def _receipt(status: str, action: AgentAction, backup: Path, displaced: Path) -> bytes:
@@ -900,7 +912,7 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
         if completed or (adoptions and plan.backup_root):
             paths = ', '.join(str(path) for path in completed)
             backup_note = f'; adoption backups: {plan.backup_root / "agents"}' if adoptions and plan.backup_root else ''
-            raise ValueError(f'agent apply incomplete after writing [{paths}]{backup_note}; stop consumers and inspect these paths, preserve concurrent edits, and manually reconcile or restore backups before retrying: {exc}') from exc
+            raise ValueError(f'agent apply incomplete after writing configured targets [{paths}] (configured paths may no longer identify the written entries){backup_note}; stop consumers, locate and preserve all current entries and concurrent edits, and manually reconcile or restore backups before retrying: {exc}') from exc
         raise
     finally:
         for fd in roots.values():
