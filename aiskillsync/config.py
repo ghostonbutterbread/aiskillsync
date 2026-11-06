@@ -205,7 +205,8 @@ def load_config(path: str | Path | None = None) -> Config:
 
 
 def _nonempty_single_line(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and value.splitlines() == [value]
+    return (isinstance(value, str) and bool(value.strip()) and value.splitlines() == [value]
+            and not any(0xD800 <= ord(char) <= 0xDFFF for char in value))
 
 
 def config_from_mapping(raw: Any, path: Path) -> Config:
@@ -676,15 +677,26 @@ def config_to_text(config: Config) -> str:
     lines.append(f"  pull_before_sync: {str(config.sync.pull_before_sync).lower()}")
     lines.append(f"  clone_if_missing: {str(config.sync.clone_if_missing).lower()}")
     lines.append(f"  materialization_workers: {config.sync.materialization_workers}")
-    lines.append("  default_destinations:")
-    for destination in config.sync.default_destinations:
-        lines.append(f"    - {_format_scalar(destination)}")
+    if config.sync.default_destinations:
+        lines.append("  default_destinations:")
+        for destination in config.sync.default_destinations:
+            lines.append(f"    - {_format_scalar(destination)}")
+    else:
+        lines.append("  default_destinations: []")
     if config.sync.migration_denylist:
         lines.append("  migration_denylist:")
         for skill_name in config.sync.migration_denylist:
             lines.append(f"    - {_format_scalar(skill_name)}")
     lines.append("")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    try:
+        text.encode("utf-8")
+        restored = config_from_mapping(parse_simple_yaml(text), config.path)
+    except (ConfigError, UnicodeError) as exc:
+        raise ConfigError(f"config cannot be serialized without changing its values: {exc}") from exc
+    if restored != config:
+        raise ConfigError("config cannot be serialized without changing its values")
+    return text
 
 
 def _format_overlay_scalar(value: str) -> str:
@@ -703,10 +715,11 @@ def _format_scalar(value: str | Path) -> str:
         or text[0] in "-[]{}#&*!|>'\"%@`"
         or text.lower() in {"true", "false", "null", "~"}
         or " #" in text
+        or ":" in text
     )
     if not needs_quotes:
         return text
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return "'" + text.replace("'", "''") + "'"
 
 
 def require_string(mapping: dict[str, Any], key: str, context: str) -> str:
@@ -732,7 +745,7 @@ def parse_simple_yaml(text: str) -> Any:
     ]
     if not lines:
         return {}
-    value, index = _parse_block(lines, 0, lines[0][0])
+    value, index = _parse_block(lines, 0, lines[0][0], root=True)
     if index != len(lines):
         _, _, line_number = lines[index]
         raise ConfigError(f"could not parse config near line {line_number}")
@@ -741,8 +754,20 @@ def parse_simple_yaml(text: str) -> Any:
 
 def _logical_lines(text: str) -> list[tuple[int, str, int]]:
     logical: list[tuple[int, str, int]] = []
-    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+    root_indent: int | None = None
+    in_overlay = False
+    for line_number, physical_line in enumerate(text.splitlines(keepends=True), start=1):
+        raw_line = physical_line.rstrip("\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029")
         without_comment = _strip_inline_comment(raw_line.rstrip())
+        if without_comment.strip():
+            indent = len(without_comment) - len(without_comment.lstrip(" "))
+            if root_indent is None:
+                root_indent = indent
+            if indent == root_indent and not without_comment.strip().startswith("- "):
+                key_value = _split_key_value(without_comment.strip())
+                in_overlay = key_value is not None and key_value[0] == "agent_overlays"
+        if in_overlay and physical_line[len(raw_line):].strip("\r\n"):
+            raise ConfigError(f"unsupported line separator in agent_overlays near line {line_number}")
         if not without_comment.strip():
             continue
         indent = len(without_comment) - len(without_comment.lstrip(" "))
@@ -775,7 +800,8 @@ def _strip_inline_comment(line: str) -> str:
 
 
 def _parse_block(
-    lines: list[tuple[int, str, int]], index: int, indent: int
+    lines: list[tuple[int, str, int]], index: int, indent: int,
+    *, overlay: bool = False, root: bool = False,
 ) -> tuple[Any, int]:
     if index >= len(lines):
         return {}, index
@@ -783,12 +809,12 @@ def _parse_block(
     if current_indent != indent:
         raise ConfigError(f"unexpected indentation near line {line_number}")
     if content.startswith("- "):
-        return _parse_list(lines, index, indent)
-    return _parse_mapping(lines, index, indent)
+        return _parse_list(lines, index, indent, overlay=overlay)
+    return _parse_mapping(lines, index, indent, overlay=overlay, root=root)
 
 
 def _parse_list(
-    lines: list[tuple[int, str, int]], index: int, indent: int
+    lines: list[tuple[int, str, int]], index: int, indent: int, *, overlay: bool = False,
 ) -> tuple[list[Any], int]:
     items: list[Any] = []
     while index < len(lines):
@@ -802,21 +828,21 @@ def _parse_list(
         index += 1
         if not item_text:
             if index < len(lines) and lines[index][0] > indent:
-                item, index = _parse_block(lines, index, lines[index][0])
+                item, index = _parse_block(lines, index, lines[index][0], overlay=overlay)
             else:
                 item = None
             items.append(item)
             continue
 
-        key_value = _split_key_value(item_text)
+        key_value = _split_key_value(item_text, overlay=overlay)
         if key_value is None:
-            items.append(_parse_scalar(item_text, line_number))
+            items.append(_parse_scalar(item_text, line_number, overlay=overlay))
             continue
 
         key, value_text = key_value
-        item: dict[str, Any] = {key: _parse_value_text(value_text, line_number)}
+        item: dict[str, Any] = {key: _parse_value_text(value_text, line_number, overlay=overlay)}
         if index < len(lines) and lines[index][0] > indent:
-            nested, index = _parse_block(lines, index, lines[index][0])
+            nested, index = _parse_block(lines, index, lines[index][0], overlay=overlay)
             if not isinstance(nested, dict):
                 raise ConfigError(f"list item mapping expected near line {line_number}")
             item.update(nested)
@@ -825,7 +851,8 @@ def _parse_list(
 
 
 def _parse_mapping(
-    lines: list[tuple[int, str, int]], index: int, indent: int
+    lines: list[tuple[int, str, int]], index: int, indent: int,
+    *, overlay: bool = False, root: bool = False,
 ) -> tuple[dict[str, Any], int]:
     mapping: dict[str, Any] = {}
     while index < len(lines):
@@ -837,28 +864,29 @@ def _parse_mapping(
         if content.startswith("- "):
             break
 
-        key_value = _split_key_value(content)
+        key_value = _split_key_value(content, overlay=overlay)
         if key_value is None:
             raise ConfigError(f"expected key/value mapping near line {line_number}")
         key, value_text = key_value
+        child_overlay = overlay or (root and key == "agent_overlays")
         index += 1
         if value_text == "":
             if index < len(lines) and lines[index][0] > indent:
-                value, index = _parse_block(lines, index, lines[index][0])
+                value, index = _parse_block(lines, index, lines[index][0], overlay=child_overlay)
             elif index < len(lines) and lines[index][0] == indent and lines[index][1].startswith("- "):
                 # YAML permits a sequence's dash at its parent mapping key's indent.
-                value, index = _parse_list(lines, index, indent)
+                value, index = _parse_list(lines, index, indent, overlay=child_overlay)
             else:
                 value = {}
         else:
-            value = _parse_value_text(value_text, line_number)
+            value = _parse_value_text(value_text, line_number, overlay=child_overlay)
         if key in mapping:
             raise ConfigError(f"duplicate key {key!r} near line {line_number}")
         mapping[key] = value
     return mapping, index
 
 
-def _split_key_value(text: str) -> tuple[str, str] | None:
+def _split_key_value(text: str, *, overlay: bool = False) -> tuple[str, str] | None:
     quote: str | None = None
     escaped = False
     for index, char in enumerate(text):
@@ -866,7 +894,7 @@ def _split_key_value(text: str) -> tuple[str, str] | None:
             if escaped:
                 escaped = False
                 continue
-            if quote == '"' and char == "\\":
+            if overlay and quote == '"' and char == "\\":
                 escaped = True
                 continue
             if char == quote:
@@ -884,13 +912,13 @@ def _split_key_value(text: str) -> tuple[str, str] | None:
     return None
 
 
-def _parse_value_text(value_text: str, line_number: int) -> Any:
+def _parse_value_text(value_text: str, line_number: int, *, overlay: bool = False) -> Any:
     if value_text == "":
         return {}
-    return _parse_scalar(value_text, line_number)
+    return _parse_scalar(value_text, line_number, overlay=overlay)
 
 
-def _parse_scalar(value: str, line_number: int) -> Any:
+def _parse_scalar(value: str, line_number: int, *, overlay: bool = False) -> Any:
     lowered = value.lower()
     if lowered == "true":
         return True
@@ -905,24 +933,29 @@ def _parse_scalar(value: str, line_number: int) -> Any:
         and value[0] == value[-1]
         and value[0] in ("'", '"')
     ):
+        if not overlay:
+            return value[1:-1].replace("''", "'") if value[0] == "'" else value[1:-1]
         if value[0] == "'":
             if not re.fullmatch(r"(?:[^']|'')*", value[1:-1]):
                 raise ConfigError(f"unsupported single-quoted scalar near line {line_number}")
             return value[1:-1].replace("''", "'")
         try:
-            return json.loads(value)
+            decoded = json.loads(value)
         except (ValueError, UnicodeError) as exc:
             raise ConfigError(f"unsupported double-quoted scalar near line {line_number}: {exc}") from exc
-    if value.startswith(("'", '"')):
+        if any(0xD800 <= ord(char) <= 0xDFFF for char in decoded):
+            raise ConfigError(f"unpaired Unicode surrogate in overlay near line {line_number}")
+        return decoded
+    if overlay and value.startswith(("'", '"')):
         raise ConfigError(f"unterminated quoted scalar near line {line_number}")
     if value.startswith("[") and value.endswith("]"):
-        return _parse_inline_list(value[1:-1], line_number)
+        return _parse_inline_list(value[1:-1], line_number, overlay=overlay)
     if value.startswith("[") or value.startswith("{"):
         raise ConfigError(f"inline collections are not supported near line {line_number}")
     return value
 
 
-def _parse_inline_list(value: str, line_number: int) -> list[Any]:
+def _parse_inline_list(value: str, line_number: int, *, overlay: bool = False) -> list[Any]:
     if not value.strip():
         return []
     items: list[Any] = []
@@ -934,7 +967,7 @@ def _parse_inline_list(value: str, line_number: int) -> list[Any]:
             if escaped:
                 escaped = False
                 continue
-            if quote == '"' and char == "\\":
+            if overlay and quote == '"' and char == "\\":
                 escaped = True
                 continue
             if char == quote:
@@ -946,12 +979,12 @@ def _parse_inline_list(value: str, line_number: int) -> list[Any]:
             item = value[start:index].strip()
             if not item:
                 raise ConfigError(f"empty inline list item near line {line_number}")
-            items.append(_parse_scalar(item, line_number))
+            items.append(_parse_scalar(item, line_number, overlay=overlay))
             start = index + 1
     if quote is not None:
         raise ConfigError(f"unterminated quote in inline list near line {line_number}")
     item = value[start:].strip()
     if not item:
         raise ConfigError(f"empty inline list item near line {line_number}")
-    items.append(_parse_scalar(item, line_number))
+    items.append(_parse_scalar(item, line_number, overlay=overlay))
     return items
