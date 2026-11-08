@@ -7,14 +7,13 @@ per-destination copy projection on detected WSL Windows mounts or explicit
 `sync.copy_destinations`; other skill destinations retain symlinks. Worktree:
 `/home/ryushe/worktrees/aiskillsync-wsl-windows-copy`, branch
 `feat/wsl-windows-copy`; base `04a78ec9564b4081d09b597fa0331da506115d97`,
-integration target `beta`. Parent owns independent review and integration; no
-push, merge, or activation. RED checkpoint `5e684b4963ccd22d5ddfb41c9742cc2ada8cb992`;
+integration target `beta`. Parent owns independent review and integration; the
+feature branch has been pushed but not merged or activated. RED checkpoint `5e684b4963ccd22d5ddfb41c9742cc2ada8cb992`;
 implementation checkpoint `aacdc9ce0ccb7d855bf1c86db0accdb84ab97d38`;
-earlier reviewer fixes `e9b9bf2` (ancestor of the current branch tip). The
-current commit adds the previously untracked detector and its tests along with
-the independent-review blocker corrections; inspect the branch tip for its SHA.
-Next: independent review of the complete `beta..feat/wsl-windows-copy` range,
-then parent-controlled integration. Remove this branch-local dossier on merge.
+Earlier checkpoints added the detector and addressed independent review blockers.
+Independent reviews accepted the final implementation; real WSL and consumer
+discovery evidence is recorded below. Next: parent-controlled beta integration.
+Remove this branch-local dossier during the integration operation.
 
 ## Contract and corrections
 
@@ -69,16 +68,23 @@ managed copies. README documents operating and recovery limits.
 
 ## Follow-up review and resume
 
-Independent re-review of `54fb03a7424cb902bd43b95ac92c3954aa84e808` verified the two original failure reproducers and simulated both DrvFS mode directions. An earlier, unpublished candidate could leave a stale symlink claim after copy removal; do not upgrade from an experimental copy of that checkpoint without clearing its stale test state. A separate reviewer identified the observed WSL VirtioFS `drvfsC0` drive tag as missing. A focused test failed on the prior commit and passed with numbered drive-tag detection; unfamiliar tags remain ambiguous. See https://github.com/microsoft/WSL/issues/14301 for the observed tag. Independent review of implementation `a9506ea0109e3349a2babe6df418b23e7ba713e9` found no blocker in the correction, verified standard beta-to-candidate upgrade with recreated links preserved, and ran the full suite: 287 tests run, one skipped. This dossier-only checkpoint bumps the package version to 0.1.51; the implementation under review is unchanged. Real WSL/Windows testing remains required before integration and activation.
+Independent re-review of `54fb03a7424cb902bd43b95ac92c3954aa84e808` verified the two original failure reproducers and simulated both DrvFS mode directions. An earlier, unpublished candidate could leave a stale symlink claim after copy removal; do not upgrade from an experimental copy of that checkpoint without clearing its stale test state. A separate reviewer identified the observed WSL VirtioFS `drvfsC0` drive tag as missing. A focused test failed on the prior commit and passed with numbered drive-tag detection; unfamiliar tags remain ambiguous. See https://github.com/microsoft/WSL/issues/14301 for the observed tag. Independent review of implementation `a9506ea0109e3349a2babe6df418b23e7ba713e9` found no blocker in the correction, verified standard beta-to-candidate upgrade with recreated links preserved, and ran the full suite: 287 tests run, one skipped. This dossier checkpoint updates real-WSL evidence; the reviewed implementation remains unchanged. Real WSL and consumer discovery are verified as described below.
 
 ## Risks and activation boundary
 
-Real WSL/Windows-backed mount behavior and Windows-side reads remain untested;
-this host is Linux without WSL. Before activation, test against a disposable WSL
-Windows mount with and without DrvFS metadata: preview and apply; Windows-side
-reads; source add/change/delete and mode-only change; repeat no-op; local content
-and mode edits; prune; and warning on mismatched mode. The independent reproducers
-simulate modes and do not establish real Windows interoperability.
+On user-authorized Abommie WSL2 kernel 6.18.54.1, a disposable Windows-backed
+9p DrvFS mount test exercised automatic detection, dry-run, first copy, Windows
+PowerShell reads, materialization of a repo-internal linked reference, repeat
+no-op, source additions/updates/removals, local edits made from Windows blocking
+replacement, stale prune, and preservation of an unrelated directory. The
+expected execute-bit mismatch warning appeared without blocking copies. Source
+module SHA-256 values matched between the reviewed checkout and WSL fixture.
+With separate user approval, a harmless probe was copied into the configured
+Windows `.agents/skills` path using an isolated config; user screenshot showed
+it discovered in the ChatGPT desktop skill picker. The screenshot establishes
+discovery, not a completed skill execution. The owned probe was hash-verified,
+removed, and Windows-native readback confirmed absence. No existing config was
+modified. WSL with metadata enabled and non-9p mount variants remain untested.
 
 Snapshots and `copytree` are not a lock or adversarial race sandbox: stop
 concurrent source-link mutations and destination writers. A failed/interrupted

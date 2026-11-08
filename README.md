@@ -31,9 +31,7 @@ example DrvFS without metadata), sync warns but publishes the copy after
 verifying file contents and tree structure; Unix executability may differ on the
 destination. Enable suitable metadata where Unix execution modes are needed. A
 dry run cannot verify destination mode support. Other permission and timestamp
-changes are not tracked. Copies recorded by the unreleased 0.1.47 candidate use
-an older snapshot format and require manual backup/removal of the copy and record
-before resync. Existing 0.1.48 records remain compatible.
+changes are not tracked. Existing 0.1.48 records remain compatible.
 A symlink already pointing to the correct skill is migrated to a copy. Unowned
 entries and unexpected links are never adopted, including with `--adopt` or
 `--overwrite`. Move or back them up manually first.
@@ -49,9 +47,9 @@ cleanup. Source symlinks resolving inside their owning bridge repo are copied as
 regular files/directories; escaping, broken, cyclic links and special files are
 rejected. Copy destinations cannot overlap any configured bridge repo. Do not
 run concurrent syncs or modify source links or destination trees while sync
-runs: snapshot checks are not a filesystem lock. A failed/interrupted apply can be partial; inspect destination,
-record, and any `.<skill>.aiskillsync-backup-*` sibling before retrying. A real
-WSL/Windows interoperability test has not yet been performed.
+runs: snapshot checks are not a filesystem lock. A failed/interrupted apply can
+be partial; inspect the destination, record, and any
+`.<skill>.aiskillsync-backup-*` sibling before retrying.
 
 ## Profile-scoped category sync
 
