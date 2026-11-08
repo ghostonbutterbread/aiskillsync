@@ -88,6 +88,10 @@ sync:
         entry = mount("/custom/windows", "virtiofs", "drvfsa")
         self.assertTrue(detect(Path("/custom/windows/Users/example"), entry))
 
+    def test_wsl_virtiofs_numbered_drive_tag(self) -> None:
+        entry = mount("/custom/windows", "virtiofs", "drvfsC0")
+        self.assertTrue(detect(Path("/custom/windows/Users/example"), entry))
+
     def test_wsl_container_virtiofs_drvfs_mount(self) -> None:
         entry = mount("/custom/windows", "virtiofs", "drvfs")
         self.assertTrue(detect(Path("/custom/windows/Users/example"), entry))

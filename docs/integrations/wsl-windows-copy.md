@@ -67,6 +67,10 @@ managed copies. README documents operating and recovery limits.
   `tests/test_windows_mount.py` are included in this commit, not an external
   untracked dependency.
 
+## Follow-up review and resume
+
+Independent re-review of `54fb03a7424cb902bd43b95ac92c3954aa84e808` verified the two original failure reproducers and simulated both DrvFS mode directions. An unreleased earlier candidate could leave a stale symlink claim after copy removal; no remote branch contains that checkpoint and it was not deployed, so users must not upgrade from an experimental copy of that checkpoint without clearing its stale test state. A separate reviewer identified the observed WSL VirtioFS `drvfsC0` drive tag as missing. A focused test failed on the prior commit and passed with numbered drive-tag detection; all other unfamiliar tags remain explicitly ambiguous. See https://github.com/microsoft/WSL/issues/14301 for the observed tag. A repeat isolated suite after that correction ran 287 tests successfully with one skipped; source CLI and project metadata both report 0.1.50. Independent review of the final correction and real WSL/Windows testing remain required before integration and activation.
+
 ## Risks and activation boundary
 
 Real WSL/Windows-backed mount behavior and Windows-side reads remain untested;

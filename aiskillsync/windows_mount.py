@@ -22,8 +22,9 @@ def _is_windows_filesystem(filesystem: list[str]) -> bool | None:
     if fs_type == "drvfs":
         return True
     if fs_type == "virtiofs":
-        # WSL drive shares and WSL container mounts use these tags.
-        return True if source in {"drvfsa", "drvfs"} else None
+        # WSL drive shares and container mounts use these tags; numbered
+        # drive tags such as drvfsC0 are also used by WSL VirtioFS.
+        return True if source in {"drvfsa", "drvfs"} or re.fullmatch(r"drvfs[A-Z][0-9]+", source) else None
     if fs_type != "9p":
         return False
     # WSL2's 9p transport is also used by non-Windows shares. Only the
