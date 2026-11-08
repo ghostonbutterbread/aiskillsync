@@ -14,6 +14,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .config import BridgeConfig, Config, atomic_write_text
+from . import managed_copies
+from .windows_mount import is_windows_destination
 from .discovery import (
     BridgeDiscovery,
     DestinationStatus,
@@ -37,6 +39,9 @@ class SyncAction:
     action: str
     profile_name: str | None = None
     managed_source_root: Path | None = None
+    copy_record_path: Path | None = None
+    copy_record: dict | None = None
+    copy_snapshot: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,10 @@ class SyncPlan:
     @property
     def prunes(self) -> tuple[SyncAction, ...]:
         return tuple(action for action in self.actions if action.action == "prune")
+
+    @property
+    def copies(self) -> tuple[SyncAction, ...]:
+        return tuple(action for action in self.actions if action.action.startswith("copy-"))
 
     @property
     def skips(self) -> tuple[SyncAction, ...]:
@@ -369,13 +378,29 @@ def build_sync_plan(
         conflict = destination_root_conflict(dest_root)
         if conflict is not None:
             errors.append(f"destination {dest_name}: {conflict}")
+        if dest_name in config.sync.copy_destinations or is_windows_destination(dest_root):
+            dest_path = _canonical_path(dest_root)
+            for discovery in discoveries:
+                source_root = _canonical_path(discovery.bridge.path)
+                if dest_path == source_root or dest_path in source_root.parents or source_root in dest_path.parents:
+                    errors.append(f"copy destination {dest_root} overlaps source repo {discovery.bridge.path}")
 
     actions: list[SyncAction] = []
     if destinations:
         for dest_name in destinations:
             dest_root = config.ai_skill_paths[dest_name]
+            copy_destination = dest_name in config.sync.copy_destinations or is_windows_destination(dest_root)
             for skill in selected_skills:
                 status = classify_destination(dest_root, skill)
+                if copy_destination:
+                    try:
+                        actions.append(_plan_copy(config.path, dest_name, dest_root, skill, status, profile_name))
+                    except (OSError, ValueError) as exc:
+                        errors.append(f"copy {dest_name}:{skill.name}: {exc}")
+                    continue
+                if managed_copies.record_path(config.path, status.path).exists():
+                    errors.append(f"managed copy at {status.path}; remove it and its ownership record explicitly before changing projection mode")
+                    continue
                 if status.key == "already-linked":
                     action = "skip"
                 elif status.key in MUTABLE_STATUSES:
@@ -398,6 +423,11 @@ def build_sync_plan(
                 )
             if not include_skill_names and not exclude_skill_names:
                 actions.extend(_stale_managed_symlink_actions(dest_name, dest_root, selected, profile_name))
+                if copy_destination:
+                    try:
+                        actions.extend(_stale_copy_actions(config.path, dest_name, dest_root, selected, selected_skills, profile_name))
+                    except (OSError, ValueError) as exc:
+                        errors.append(f"copy prune {dest_name}: {exc}")
 
     return SyncPlan(
         dry_run=dry_run,
@@ -411,6 +441,60 @@ def build_sync_plan(
         duplicate_skills=duplicate_skills,
         profile_name=profile_name,
     )
+
+
+def _plan_copy(config_path: Path, dest_name: str, root: Path, skill: Skill,
+               status: DestinationStatus, profile_name: str | None) -> SyncAction:
+    source = skill.path.resolve(strict=False)
+    destination = root.resolve(strict=False) / skill.name
+    if source == destination or source in destination.parents or destination in source.parents:
+        raise ValueError(f"source and destination overlap: {source} and {destination}")
+    record_file = managed_copies.record_path(config_path, status.path)
+    record = managed_copies.load_record(record_file)
+    source_snapshot = managed_copies.snapshot(source, source_repo=skill.bridge.path)
+    if record is not None:
+        if (record["destination"] != str(destination) or record["source"] != str(source)
+            or record["profile"] != profile_name):
+            raise ValueError(f"managed copy ownership differs at {status.path}; inspect record {record_file}")
+        if status.key != "directory-copy" or managed_copies.snapshot(status.path) != record["snapshot"]:
+            raise ValueError(f"managed copy locally modified or missing: {status.path}; preserve and resolve manually")
+        action = "skip" if source_snapshot == record.get("source_snapshot", record["snapshot"]) else "copy-refresh"
+        status = DestinationStatus("managed-copy", "managed copy", status.path, status.detail)
+    elif status.key == "missing":
+        action = "copy-create"
+    elif status.key == "already-linked":
+        action = "copy-migrate"
+    else:
+        raise ValueError(f"unmanaged destination at {status.path}; move or back it up manually before copying")
+    return SyncAction(dest_name, root, skill, status, action, profile_name,
+                      copy_record_path=record_file, copy_record=record, copy_snapshot=source_snapshot)
+
+
+def _stale_copy_actions(config_path: Path, dest_name: str, root: Path,
+                        discoveries: tuple[BridgeDiscovery, ...], selected_skills: list[Skill],
+                        profile_name: str | None) -> tuple[SyncAction, ...]:
+    valid = {str(_canonical_path(d.skills_dir)): d for d in discoveries
+             if d.bridge.enabled and d.root_exists and d.root_is_dir and d.exists and not d.missing_skill_md}
+    all_names = {skill.name for d in discoveries for skill in d.skills}
+    desired = {skill.name for skill in selected_skills}
+    result = []
+    for record_file, record in managed_copies.records(config_path):
+        path = Path(record["destination"])
+        if path.parent != _canonical_path(root) or record["profile"] != profile_name:
+            continue
+        discovery = valid.get(record["source_root"])
+        if discovery is None or path.name in desired:
+            continue
+        if profile_name is None and path.name in all_names:
+            continue
+        if path.is_symlink() or not path.is_dir() or managed_copies.snapshot(path) != record["snapshot"]:
+            raise ValueError(f"stale managed copy locally modified or missing: {path}; preserve and resolve manually")
+        source = Path(record["source"])
+        skill = Skill(path.name, discovery.bridge, source, source / "SKILL.md")
+        status = DestinationStatus("stale-managed-copy", "stale managed copy", path, str(path))
+        result.append(SyncAction(dest_name, root, skill, status, "copy-prune", profile_name,
+                                 copy_record_path=record_file, copy_record=record))
+    return tuple(result)
 
 
 def select_bridges(
@@ -532,7 +616,7 @@ def apply_sync_plan(plan: SyncPlan) -> ApplyResult:
     created: list[str] = []
     pruned: list[str] = []
     seen_action_paths: dict[Path, SyncAction] = {}
-    for action in (*plan.links, *plan.adoptions, *plan.prunes):
+    for action in (*plan.links, *plan.adoptions, *plan.prunes, *plan.copies):
         action_path = _destination_action_path(action.status.path)
         previous = seen_action_paths.get(action_path)
         if previous is not None:
@@ -543,7 +627,7 @@ def apply_sync_plan(plan: SyncPlan) -> ApplyResult:
             )
         seen_action_paths[action_path] = action
     for dest_root in {
-        action.destination_root for action in (*plan.links, *plan.adoptions, *plan.prunes)
+        action.destination_root for action in (*plan.links, *plan.adoptions, *plan.prunes, *plan.copies)
     }:
         conflict = destination_root_conflict(dest_root)
         if conflict is not None:
@@ -568,6 +652,15 @@ def apply_sync_plan(plan: SyncPlan) -> ApplyResult:
                 f"destination changed before prune: {action.destination}:{action.skill.name} "
                 f"is no longer a stale managed symlink"
             )
+    # Retire legacy link ownership before a copy may supersede or remove it.
+    # A failed manifest write must block the corresponding filesystem mutation.
+    for action in plan.actions:
+        if action.copy_record_path is not None and action.status.key == "managed-copy" and action.action == "skip":
+            _forget_copy_profile_links(action)
+    for action in plan.copies:
+        _forget_copy_profile_links(action)
+        managed_copies.apply_copy(action)
+        (pruned if action.action == "copy-prune" else created).append(f"{action.destination}:{action.skill.name}")
     for action in plan.adoptions:
         backup_path = _backup_path(plan.backup_root, action)
         backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -592,6 +685,25 @@ def projection_manifest_path(config_path: Path) -> Path:
     return config_path.parent / "profile-projections.json"
 
 
+def _forget_copy_profile_links(action: SyncAction) -> None:
+    """Retire all profile link claims at an entry before copy ownership takes over."""
+    assert action.copy_record_path is not None
+    path = action.copy_record_path.parent.parent / "profile-projections.json"
+    if not path.exists():
+        return
+    manifest = _load_projection_manifest(path)
+    key = (_canonical_path(action.destination_root), action.skill.name)
+    changed = False
+    for profile, records in manifest["profiles"].items():
+        retained = [record for record in records
+                    if (Path(record["destination_root"]), record["entry"]) != key]
+        if retained != records:
+            manifest["profiles"][profile] = retained
+            changed = True
+    if changed:
+        atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
 def add_profile_manifest_prunes(plan: SyncPlan, config_path: Path) -> SyncPlan:
     """Add safe stale-entry prunes for a profile's previously recorded projection."""
 
@@ -601,7 +713,7 @@ def add_profile_manifest_prunes(plan: SyncPlan, config_path: Path) -> SyncPlan:
     desired = {
         (_canonical_path(action.destination_root), action.skill.name)
         for action in plan.actions
-        if action.action in {"link", "skip", "adopt"}
+        if action.action in {"link", "skip", "adopt", "copy-create", "copy-refresh", "copy-migrate"}
     }
     existing_paths = {_destination_action_path(action.status.path) for action in plan.prunes}
     stale_actions: list[SyncAction] = []
@@ -701,7 +813,7 @@ def update_profile_projection_manifest(plan: SyncPlan, config_path: Path) -> Non
             "source_root": str(_canonical_path(action.skill.bridge.skills_dir)),
         }
         for action in plan.actions
-        if action.action in {"link", "skip", "adopt"}
+        if action.action in {"link", "skip", "adopt"} and action.status.key != "managed-copy"
     ]
     desired_keys = {(Path(record["destination_root"]), record["entry"]) for record in desired}
     retained = [
@@ -709,8 +821,10 @@ def update_profile_projection_manifest(plan: SyncPlan, config_path: Path) -> Non
         if (Path(record["destination_root"]), record["entry"]) not in pruned
         and (Path(record["destination_root"]), record["entry"]) not in desired_keys
     ]
-    profiles[plan.profile_name] = [*retained, *desired]
-    atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    updated = [*retained, *desired]
+    if records != updated:
+        profiles[plan.profile_name] = updated
+        atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
 def _load_projection_manifest(path: Path) -> dict[str, Any]:
