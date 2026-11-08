@@ -654,8 +654,20 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     new_config = effective_config(configured, {group: lane})
     new_bridge = next(item for item in new_config.bridges if item.name == new_bridge_name)
     destinations = tuple(args.dest) or configured.sync.default_destinations
-    switch_destinations = (tuple(configured.ai_skill_paths) if configured.profile_sets and not args.dest
-                           else destinations)
+    switch_profiles = None
+    if configured.profile_sets:
+        lane_sources = {old_bridge_name, new_bridge_name}
+        switch_profiles = tuple(profile for profile in configured.profile_sets
+                                if lane_sources.intersection(source.bridge for source in profile.sources)
+                                and any(name in configured.ai_skill_paths for name in profile.destinations))
+        switch_destinations = tuple(dict.fromkeys(name for profile in switch_profiles
+                                                  for name in profile.destinations
+                                                  if name in configured.ai_skill_paths))
+        if args.dest and set(args.dest) != set(switch_destinations):
+            raise ConfigError("switch --dest must include exactly the affected profile destinations")
+        destinations = switch_destinations
+    else:
+        switch_destinations = destinations
     for name in switch_destinations:
         root = configured.ai_skill_paths.get(name)
         if root is not None and (name in configured.sync.copy_destinations or is_windows_destination(root)):
@@ -677,13 +689,14 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         verbose=args.verbose,
         lane_overrides={group: lane},
         skills_only=True,
+        switch_profiles=tuple(profile.name for profile in switch_profiles) if switch_profiles is not None else None,
     )
     print(f"Switching {group} to lane {lane}", file=stdout)
     if stale:
         print("Stale lane symlinks:", file=stdout)
         for path in stale:
             print(f"  PRUNE {path}", file=stdout)
-    result = cmd_sync(sync_args, stdout, stderr)
+    result = 0 if switch_profiles == () else cmd_sync(sync_args, stdout, stderr)
     if result == 0 and not args.dry_run:
         try:
             if group == configured.bbh_launcher_lane_group:
@@ -693,7 +706,7 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             print(f"aiskillsync: could not persist active lane; restoring prior skill links: {exc}", file=stderr)
             rollback_args = argparse.Namespace(**vars(sync_args))
             rollback_args.lane_overrides = {}
-            rollback_result = cmd_sync(rollback_args, stdout, stderr)
+            rollback_result = 0 if switch_profiles == () else cmd_sync(rollback_args, stdout, stderr)
             if group == configured.bbh_launcher_lane_group:
                 try:
                     _project_bbh_launcher(configured, old_bridge)
@@ -704,6 +717,12 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
                 print("aiskillsync: rollback failed; inspect destination links before retrying", file=stderr)
             return 1
         for path in stale:
+            # Profile manifest pruning may already have removed the same link.
+            if not path.exists() and not path.is_symlink():
+                continue
+            if not path.is_symlink() or not path.resolve(strict=False).is_relative_to(old_bridge.skills_dir.resolve(strict=False)):
+                print(f"aiskillsync: stale lane entry changed; preserve and inspect: {path}", file=stderr)
+                return 1
             path.unlink()
         if stale:
             print("Removed stale lane symlinks:", file=stdout)
@@ -1171,6 +1190,10 @@ def _read_skill_denylist(path: Path) -> tuple[str, ...]:
 
 
 def _resolve_sync_requests(config: Config, args: argparse.Namespace) -> tuple[SyncRequest, ...]:
+    switch_profiles = getattr(args, "switch_profiles", None)
+    if switch_profiles is not None:
+        return tuple(_profile_sync_request(config, profile) for profile in config.profile_sets
+                     if profile.name in switch_profiles)
     if getattr(args, "profile", None):
         return (_resolve_sync_request(config, args),)
     if config.profile_sets:
@@ -2484,7 +2507,7 @@ def _destination_summary_counts(plan: SyncPlan) -> dict[str, int]:
     return {
         "linked": len(plan.links),
         "adopted": len(plan.adoptions),
-        "pruned": len(plan.prunes),
+        "pruned": len(plan.prunes) + sum(action.action == "copy-prune" for action in plan.copies),
         "skipped": len(plan.skips),
         "conflicts": len(plan.conflicts),
         "errors": errors,

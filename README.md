@@ -25,21 +25,30 @@ next to the selected config. Keep that state with the config: without it existin
 directories are unowned and will not be replaced. The next sync refreshes an
 unchanged managed tree when its source changes and prunes an unchanged stale
 copy; content edits, added/removed files or directories, or missing/invalid
-ownership block replacement or pruning. Permission and timestamp changes alone
-are not tracked.
+ownership block replacement or pruning. File executable bits are tracked and
+preserved; other permission and timestamp changes are not tracked. If the
+filesystem cannot represent the source executable bits (for example a DrvFS
+mount without suitable metadata), apply fails with an explicit error before
+publishing the copy; use a destination supporting Unix modes, such as a WSL
+mount configured with metadata. A dry run cannot verify the destination's mode
+support. Copies recorded by the unreleased 0.1.47 candidate use an older snapshot
+format and require manual backup/removal of the copy and record before resync.
 A symlink already pointing to the correct skill is migrated to a copy. Unowned
 entries and unexpected links are never adopted, including with `--adopt` or
 `--overwrite`. Move or back them up manually first.
 
-Limitations: `switch` does not support copy destinations; use separate
-destinations or manually move the existing copy and its ownership record.
+Limitations: `switch` does not support affected copy destinations; unrelated
+profiles are not synced by a lane switch. With profiles, `switch --dest` must
+list every affected profile destination, because the lane selection is global.
 Changing a managed copy's source, profile owner, or projection mode is blocked;
 back up and remove the copy and its corresponding record before resyncing. A
 profile prune only covers currently selected destination roots and available
 selected source roots; old roots or removed/disabled sources require manual
-cleanup. Nested symlinks and special files in copied trees are rejected. Do not
-run concurrent syncs or edit a copy while sync runs: snapshot checks are not a
-filesystem lock. A failed/interrupted apply can be partial; inspect destination,
+cleanup. Source symlinks resolving inside their owning bridge repo are copied as
+regular files/directories; escaping, broken, cyclic links and special files are
+rejected. Copy destinations cannot overlap any configured bridge repo. Do not
+run concurrent syncs or modify source links or destination trees while sync
+runs: snapshot checks are not a filesystem lock. A failed/interrupted apply can be partial; inspect destination,
 record, and any `.<skill>.aiskillsync-backup-*` sibling before retrying. A real
 WSL/Windows interoperability test has not yet been performed.
 

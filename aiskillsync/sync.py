@@ -381,9 +381,9 @@ def build_sync_plan(
         if dest_name in config.sync.copy_destinations or is_windows_destination(dest_root):
             dest_path = _canonical_path(dest_root)
             for discovery in discoveries:
-                source_root = _canonical_path(discovery.skills_dir)
+                source_root = _canonical_path(discovery.bridge.path)
                 if dest_path == source_root or dest_path in source_root.parents or source_root in dest_path.parents:
-                    errors.append(f"copy destination {dest_root} overlaps source root {discovery.skills_dir}")
+                    errors.append(f"copy destination {dest_root} overlaps source repo {discovery.bridge.path}")
 
     actions: list[SyncAction] = []
     if destinations:
@@ -451,7 +451,7 @@ def _plan_copy(config_path: Path, dest_name: str, root: Path, skill: Skill,
         raise ValueError(f"source and destination overlap: {source} and {destination}")
     record_file = managed_copies.record_path(config_path, status.path)
     record = managed_copies.load_record(record_file)
-    source_snapshot = managed_copies.snapshot(source)
+    source_snapshot = managed_copies.snapshot(source, source_repo=skill.bridge.path)
     if record is not None:
         if (record["destination"] != str(destination) or record["source"] != str(source)
             or record["profile"] != profile_name):

@@ -20,34 +20,49 @@ def record_path(config_path: Path, destination: Path) -> Path:
     return config_path.parent / "managed-copies" / (hashlib.sha256(os.fsencode(key)).hexdigest() + ".json")
 
 
-def snapshot(root: Path) -> dict[str, str]:
+def snapshot(root: Path, *, source_repo: Path | None = None) -> dict[str, str]:
     if root.is_symlink() or not root.is_dir():
         raise ValueError(f"copy tree is not a regular directory: {root}")
+    repo = source_repo.resolve(strict=True) if source_repo is not None else None
     result: dict[str, str] = {}
 
-    def visit(directory: Path) -> None:
-        # Path.rglob can silently suppress scandir errors, which would make an
-        # incomplete tree appear safe to replace or prune.
+    def visit(directory: Path, relative_root: Path, ancestors: frozenset[Path]) -> None:
+        resolved = directory.resolve(strict=True)
+        if resolved in ancestors:
+            raise ValueError(f"copy source symlink cycle: {directory}")
+        ancestors = ancestors | {resolved}
+        # Path.rglob can silently suppress scandir errors.
         with os.scandir(directory) as entries:
             for entry in sorted(entries, key=lambda item: item.name):
                 path = directory / entry.name
-                relative = path.relative_to(root).as_posix()
+                relative_path = relative_root / entry.name
+                relative = relative_path.as_posix()
                 mode = entry.stat(follow_symlinks=False).st_mode
                 if stat.S_ISLNK(mode):
-                    raise ValueError(f"copy trees cannot contain symlinks: {path}")
+                    if repo is None:
+                        raise ValueError(f"copy trees cannot contain symlinks: {path}")
+                    try:
+                        target = path.resolve(strict=True)
+                    except (OSError, RuntimeError) as exc:
+                        raise ValueError(f"broken or cyclic copy source symlink: {path}") from exc
+                    if not target.is_relative_to(repo):
+                        raise ValueError(f"copy source symlink escapes repo: {path}")
+                    mode = target.stat().st_mode
                 if stat.S_ISDIR(mode):
                     result[relative] = "directory"
-                    visit(path)
+                    visit(path, relative_path, ancestors)
                 elif stat.S_ISREG(mode):
                     digest = hashlib.sha256()
                     with path.open("rb") as stream:
                         for block in iter(lambda: stream.read(1024 * 1024), b""):
                             digest.update(block)
-                    result[relative] = digest.hexdigest()
+                    result[relative] = f"{mode & 0o111:03o}:{digest.hexdigest()}"
                 else:
                     raise ValueError(f"copy trees cannot contain special files: {path}")
 
-    visit(root)
+    if repo is not None and not root.resolve(strict=True).is_relative_to(repo):
+        raise ValueError(f"copy source is outside repo: {root}")
+    visit(root, Path(), frozenset())
     return result
 
 
@@ -94,7 +109,7 @@ def apply_copy(action) -> None:
         shutil.rmtree(path)
         record_file.unlink()
         return
-    if snapshot(action.skill.path) != action.copy_snapshot:
+    if snapshot(action.skill.path, source_repo=action.skill.bridge.path) != action.copy_snapshot:
         raise ValueError(f"source changed before copy: {action.skill.path}")
     if action.action == "copy-create":
         if path.exists() or path.is_symlink():
@@ -110,8 +125,15 @@ def apply_copy(action) -> None:
     backup = None
     try:
         shutil.copytree(action.skill.path, stage, dirs_exist_ok=True, symlinks=False)
-        if snapshot(stage) != action.copy_snapshot or snapshot(action.skill.path) != action.copy_snapshot:
+        staged_snapshot = snapshot(stage)
+        if snapshot(action.skill.path, source_repo=action.skill.bridge.path) != action.copy_snapshot:
             raise ValueError(f"source changed while copying: {action.skill.path}")
+        if staged_snapshot != action.copy_snapshot:
+            def content_only(values):
+                return {name: value.split(":", 1)[-1] for name, value in values.items()}
+            if content_only(staged_snapshot) == content_only(action.copy_snapshot):
+                raise ValueError(f"executable bits cannot be preserved on destination {path}; use a filesystem with Unix metadata enabled")
+            raise ValueError(f"staged copy differs from source: {action.skill.path}")
         if action.action == "copy-create":
             if path.exists() or path.is_symlink():
                 raise ValueError(f"destination appeared while copying: {path}")

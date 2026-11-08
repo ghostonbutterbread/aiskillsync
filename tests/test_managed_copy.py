@@ -87,7 +87,9 @@ sync:
             (dest / "example" / "local").unlink()
             (source / "SKILL.md").unlink()
             source.rmdir()
-            self.assertEqual(run().returncode, 0)
+            pruned = run()
+            self.assertEqual(pruned.returncode, 0, pruned.stdout + pruned.stderr)
+            self.assertIn("pruned=1", pruned.stdout)
             self.assertFalse((dest / "example").exists())
 
 
@@ -181,6 +183,28 @@ sync:
             self.assertFalse(dest.exists())
 
 
+    def test_copy_destination_inside_repo_outside_skills_is_blocked(self) -> None:
+        from aiskillsync.config import load_config
+        from aiskillsync.sync import build_sync_plan
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); repo = base / "repo"; source = repo / "skills" / "x"
+            source.mkdir(parents=True); (source / "SKILL.md").write_text("source")
+            (source / "shared").symlink_to(repo / "exports", target_is_directory=True)
+            (repo / "exports").mkdir()
+            config = base / "config.yaml"
+            config.write_text(f"""bridges:
+  - name: source
+    path: {repo}
+ai_skill_paths:
+  windows: {repo / 'exports'}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations: [windows]
+  copy_destinations: [windows]
+""")
+            self.assertTrue(build_sync_plan(load_config(config), ("all",), (), dry_run=False).has_blockers)
+
     def test_revalidation_rejects_changes_between_plan_and_apply(self) -> None:
         from aiskillsync.config import load_config
         from aiskillsync.sync import build_sync_plan, apply_sync_plan
@@ -206,10 +230,14 @@ sync:
                 apply_sync_plan(plan)
             self.assertFalse((dest / "x").exists())
 
-    def test_nested_symlinks_are_rejected_without_copy(self) -> None:
+    def test_nested_symlinks_within_repo_materialize_and_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp); source = base / "repo" / "skills" / "x"; source.mkdir(parents=True)
-            (source / "SKILL.md").write_text("source"); (source / "alias").symlink_to(source / "SKILL.md")
+            (source / "SKILL.md").write_text("source")
+            shared = base / "repo" / "shared"; shared.mkdir()
+            (shared / "guide").write_text("first")
+            (source / "alias").symlink_to(shared / "guide")
+            (source / "dir-link").symlink_to(shared, target_is_directory=True)
             dest = base / "dest"; config = base / "config.yaml"
             config.write_text(f"""bridges:
   - name: source
@@ -225,10 +253,109 @@ sync:
             result = subprocess.run([sys.executable, "-m", "aiskillsync", "--config", str(config), "sync", "all"],
                                     cwd=ROOT, env=dict(os.environ, HOME=str(base), PYTHONPATH=str(ROOT)),
                                     text=True, capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("symlink", result.stdout + result.stderr)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((dest / "x" / "alias").is_symlink())
+            self.assertEqual((dest / "x" / "dir-link" / "guide").read_text(), "first")
+            (shared / "guide").write_text("second")
+            result = subprocess.run([sys.executable, "-m", "aiskillsync", "--config", str(config), "sync", "all"],
+                                    cwd=ROOT, env=dict(os.environ, HOME=str(base), PYTHONPATH=str(ROOT)),
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((dest / "x" / "alias").read_text(), "second")
+
+
+    def test_unsafe_source_links_and_special_files_block_before_copy(self) -> None:
+        from aiskillsync.config import load_config
+        from aiskillsync.sync import build_sync_plan
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); repo = base / "repo"; source = repo / "skills" / "x"
+            source.mkdir(parents=True); (source / "SKILL.md").write_text("source")
+            (base / "outside").write_text("outside")
+            config = base / "config.yaml"; dest = base / "dest"
+            config.write_text(f"""bridges:
+  - name: source
+    path: {repo}
+ai_skill_paths:
+  windows: {dest}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations: [windows]
+  copy_destinations: [windows]
+""")
+            cfg = load_config(config); link = source / "bad"
+            for target in (base / "outside", repo / "missing", source):
+                with self.subTest(target=target):
+                    link.symlink_to(target)
+                    plan = build_sync_plan(cfg, ("all",), (), dry_run=False)
+                    self.assertTrue(plan.has_blockers, plan.errors)
+                    self.assertFalse(dest.exists())
+                    link.unlink()
+            os.mkfifo(link)
+            self.assertTrue(build_sync_plan(cfg, ("all",), (), dry_run=False).has_blockers)
             self.assertFalse(dest.exists())
 
+    def test_executable_only_source_change_refreshes_and_local_mode_edit_blocks(self) -> None:
+        from aiskillsync.config import load_config
+        from aiskillsync.sync import build_sync_plan, apply_sync_plan
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); source = base / "repo" / "skills" / "x"; source.mkdir(parents=True)
+            (source / "SKILL.md").write_text("source")
+            script = source / "run"; script.write_text("#!/bin/sh\n"); script.chmod(0o644)
+            dest = base / "dest"; config = base / "config.yaml"
+            config.write_text(f"""bridges:
+  - name: source
+    path: {base / 'repo'}
+ai_skill_paths:
+  windows: {dest}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations: [windows]
+  copy_destinations: [windows]
+""")
+            cfg = load_config(config)
+            apply_sync_plan(build_sync_plan(cfg, ("all",), (), dry_run=False))
+            script.chmod(0o755)
+            plan = build_sync_plan(cfg, ("all",), (), dry_run=False)
+            self.assertEqual(plan.copies[0].action, "copy-refresh")
+            apply_sync_plan(plan)
+            self.assertEqual((dest / "x" / "run").stat().st_mode & 0o111, 0o111)
+            self.assertFalse(build_sync_plan(cfg, ("all",), (), dry_run=False).copies)
+            (dest / "x" / "run").chmod(0o644)
+            self.assertTrue(build_sync_plan(cfg, ("all",), (), dry_run=False).has_blockers)
+
+    def test_unsupported_destination_executable_bits_report_error(self) -> None:
+        from unittest.mock import patch
+        import shutil
+        from aiskillsync.config import load_config
+        from aiskillsync.sync import build_sync_plan, apply_sync_plan
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); source = base / "repo" / "skills" / "x"; source.mkdir(parents=True)
+            (source / "SKILL.md").write_text("source")
+            (source / "run").write_text("script"); (source / "run").chmod(0o755)
+            dest = base / "dest"; config = base / "config.yaml"
+            config.write_text(f"""bridges:
+  - name: source
+    path: {base / 'repo'}
+ai_skill_paths:
+  windows: {dest}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations: [windows]
+  copy_destinations: [windows]
+""")
+            plan = build_sync_plan(load_config(config), ("all",), (), dry_run=False)
+            original = shutil.copytree
+            def lose_mode(*args, **kwargs):
+                result = original(*args, **kwargs)
+                (Path(args[1]) / "run").chmod(0o644)
+                return result
+            with patch("aiskillsync.managed_copies.shutil.copytree", side_effect=lose_mode):
+                with self.assertRaisesRegex(ValueError, "executable.*destination"):
+                    apply_sync_plan(plan)
+            self.assertFalse((dest / "x").exists())
 
     def test_mount_detection_selects_copy_without_explicit_override(self) -> None:
         from unittest.mock import patch
@@ -288,6 +415,64 @@ sync:
             plan = build_sync_plan(cfg, ("all",), (), dry_run=False)
             self.assertTrue(plan.has_blockers)
 
+
+    def test_lane_switch_ignores_unrelated_windows_copy_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for name in ("stable", "beta", "other"):
+                skill = base / name / "skills" / ("other" if name == "other" else "x")
+                skill.mkdir(parents=True); (skill / "SKILL.md").write_text(name)
+            config = base / "config.yaml"
+            config.write_text(f"""bridges:
+  - name: stable
+    path: {base / 'stable'}
+  - name: beta
+    path: {base / 'beta'}
+  - name: other
+    path: {base / 'other'}
+lanes:
+  policy:
+    default: stable
+    variants:
+      stable: stable
+      beta: beta
+ai_skill_paths:
+  linux: {base / 'linux'}
+  windows: {base / 'windows'}
+profile_sets:
+  desktop:
+    destinations: [linux]
+    sources:
+      - bridge: stable
+      - bridge: beta
+  unrelated:
+    destinations: [windows]
+    sources:
+      - bridge: other
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations: [linux]
+  copy_destinations: [windows]
+""")
+            old = base / "stable" / "skills" / "removed"; old.mkdir()
+            (old / "SKILL.md").write_text("old")
+            env = dict(os.environ, HOME=str(base), PYTHONPATH=str(ROOT))
+            initial = subprocess.run([sys.executable, "-m", "aiskillsync", "--config", str(config),
+                                      "sync", "--profile", "desktop"], cwd=ROOT, env=env,
+                                     text=True, capture_output=True)
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            other = subprocess.run([sys.executable, "-m", "aiskillsync", "--config", str(config),
+                                    "sync", "--profile", "unrelated"], cwd=ROOT, env=env,
+                                   text=True, capture_output=True)
+            self.assertEqual(other.returncode, 0, other.stdout + other.stderr)
+            (base / "other" / "skills" / "other" / "SKILL.md").write_text("changed")
+            result = subprocess.run([sys.executable, "-m", "aiskillsync", "--config", str(config), "switch", "beta"],
+                                    cwd=ROOT, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((base / "linux" / "removed").exists())
+            self.assertEqual((base / "linux" / "x").resolve(), base / "beta" / "skills" / "x")
+            self.assertEqual((base / "windows" / "other" / "SKILL.md").read_text(), "other")
 
     def test_lane_switch_blocks_copy_profile_outside_default_destinations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
