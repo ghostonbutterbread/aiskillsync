@@ -67,6 +67,10 @@ sync:
                                        "sync", "all", *args], cwd=ROOT, env=env, text=True, capture_output=True)
             self.assertEqual(run().returncode, 0)
             record = next((base / "managed-copies").glob("*.json"))
+            # Records from the previous release used a single shared snapshot.
+            import json
+            legacy = json.loads(record.read_text()); legacy.pop("source_snapshot")
+            record.write_text(json.dumps(legacy))
             before = (record.stat().st_mtime_ns, (dest / "example" / "SKILL.md").stat().st_mtime_ns)
             self.assertEqual(run().returncode, 0)
             self.assertEqual(before, (record.stat().st_mtime_ns, (dest / "example" / "SKILL.md").stat().st_mtime_ns))
@@ -119,20 +123,85 @@ sync:
   copy_destinations: [windows]
 """)
             env = dict(os.environ, HOME=str(base), PYTHONPATH=str(ROOT))
-            def run():
+            def run(*args):
                 return subprocess.run([sys.executable, "-m", "aiskillsync", "--config", str(config),
-                                       "sync", "--profile", "myprofile"], cwd=ROOT, env=env, text=True, capture_output=True)
+                                       "sync", "--profile", "myprofile", *args], cwd=ROOT, env=env, text=True, capture_output=True)
             write("[one, two]")
             config.write_text(config.read_text().replace("  copy_destinations: [windows]\n", ""))
             result = run(); self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue((dest / "two").is_symlink())
             write("[one, two]")
-            result = run(); self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = run("--skill", "one"); self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse((dest / "one").is_symlink())
+            import json
+            manifest = json.loads((base / "profile-projections.json").read_text())
+            self.assertEqual([r["entry"] for r in manifest["profiles"]["myprofile"]], ["two"])
+            result = run(); self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            manifest = json.loads((base / "profile-projections.json").read_text())
+            self.assertEqual(manifest["profiles"]["myprofile"], [])
+            # Simulate a copy produced by the earlier candidate with a stale claim.
+            manifest["profiles"]["myprofile"].append({"destination_root": str(dest), "entry": "two",
+                "target": str(root / "two"), "source_root": str(root)})
+            (base / "profile-projections.json").write_text(json.dumps(manifest))
             write("[one]")
             result = run(); self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse((dest / "two").exists())
             self.assertEqual((dest / "one" / "SKILL.md").read_text(), "one")
+            (dest / "two").symlink_to(root / "two", target_is_directory=True)
+            result = run(); self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((dest / "two").is_symlink(), result.stdout + result.stderr)
+
+    def test_manifest_failure_blocks_copy_and_copy_failure_retires_link_claim(self) -> None:
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); source = base / "repo" / "skills" / "x"
+            source.mkdir(parents=True); (source / "SKILL.md").write_text("x")
+            dest = base / "dest"; config = base / "config.yaml"
+            config.write_text(f'''bridges:
+  - name: source
+    path: {base / 'repo'}
+ai_skill_paths:
+  windows: {dest}
+profile_sets:
+  p:
+    destination: windows
+    sources:
+      - bridge: source
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+''')
+            env = dict(os.environ, HOME=str(base), PYTHONPATH=str(ROOT))
+            def run(driver=None):
+                cmd = [sys.executable, "-m", "aiskillsync"] if driver is None else [sys.executable, "-c", driver]
+                return subprocess.run([*cmd, "--config", str(config), "sync", "--profile", "p"],
+                                      cwd=ROOT, env=env, text=True, capture_output=True)
+            result = run(); self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            config.write_text(config.read_text() + "  copy_destinations: [windows]\n")
+            fail_manifest = '''import sys
+import aiskillsync.sync as sync
+def fail(*args, **kwargs): raise OSError('manifest write failed')
+sync.atomic_write_text = fail
+from aiskillsync.cli import main
+sys.exit(main())'''
+            result = run(fail_manifest)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((dest / "x").is_symlink())
+            manifest = json.loads((base / "profile-projections.json").read_text())
+            self.assertEqual([r["entry"] for r in manifest["profiles"]["p"]], ["x"])
+            fail_copy = '''import sys
+import aiskillsync.managed_copies as copies
+def fail(*args, **kwargs): raise OSError('copy failed')
+copies.shutil.copytree = fail
+from aiskillsync.cli import main
+sys.exit(main())'''
+            result = run(fail_copy)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((dest / "x").is_symlink())
+            manifest = json.loads((base / "profile-projections.json").read_text())
+            self.assertEqual(manifest["profiles"]["p"], [])
+            result = run(); self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((dest / "x").is_symlink())
 
     def test_unowned_directory_is_not_adopted_even_with_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -325,11 +394,7 @@ sync:
             (dest / "x" / "run").chmod(0o644)
             self.assertTrue(build_sync_plan(cfg, ("all",), (), dry_run=False).has_blockers)
 
-    def test_unsupported_destination_executable_bits_report_error(self) -> None:
-        from unittest.mock import patch
-        import shutil
-        from aiskillsync.config import load_config
-        from aiskillsync.sync import build_sync_plan, apply_sync_plan
+    def test_drvfs_mode_mismatch_warns_and_preserves_both_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp); source = base / "repo" / "skills" / "x"; source.mkdir(parents=True)
             (source / "SKILL.md").write_text("source")
@@ -346,14 +411,68 @@ sync:
   default_destinations: [windows]
   copy_destinations: [windows]
 """)
+            # Exercise the real CLI, simulating DrvFS forcing executable bits in staged files.
+            driver = '''import shutil, sys
+from pathlib import Path
+original = shutil.copytree
+def drvfs(src, dst, *args, **kwargs):
+    result = original(src, dst, *args, **kwargs)
+    for path in Path(dst).rglob('*'):
+        if path.is_file(): path.chmod(path.stat().st_mode | 0o111)
+    return result
+shutil.copytree = drvfs
+from aiskillsync.cli import main
+sys.exit(main())'''
+            def run():
+                return subprocess.run([sys.executable, "-c", driver, "--config", str(config), "sync", "all", "-v"],
+                                      cwd=ROOT, env=dict(os.environ, HOME=str(base), PYTHONPATH=str(ROOT)),
+                                      text=True, capture_output=True)
+            first = run()
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.assertIn("WARNING", first.stdout + first.stderr)
+            self.assertIn("executable", first.stdout + first.stderr)
+            self.assertEqual((dest / "x" / "SKILL.md").read_text(), "source")
+            second = run()
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertNotIn("COPY-REFRESH", second.stdout)
+            (source / "run").chmod(0o644)
+            refresh = run()
+            self.assertEqual(refresh.returncode, 0, refresh.stdout + refresh.stderr)
+            self.assertIn("COPY-REFRESH", refresh.stdout)
+            self.assertNotIn("COPY-REFRESH", run().stdout)
+            (dest / "x" / "run").chmod(0o644)
+            blocked = run()
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("locally modified", blocked.stdout + blocked.stderr)
+
+    def test_staged_content_mismatch_still_blocks_copy(self) -> None:
+        from unittest.mock import patch
+        import shutil
+        from aiskillsync.config import load_config
+        from aiskillsync.sync import build_sync_plan, apply_sync_plan
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); source = base / "repo" / "skills" / "x"; source.mkdir(parents=True)
+            (source / "SKILL.md").write_text("source")
+            config = base / "config.yaml"; dest = base / "dest"
+            config.write_text(f'''bridges:
+  - name: source
+    path: {base / 'repo'}
+ai_skill_paths:
+  windows: {dest}
+sync:
+  pull_before_sync: false
+  clone_if_missing: false
+  default_destinations: [windows]
+  copy_destinations: [windows]
+''')
             plan = build_sync_plan(load_config(config), ("all",), (), dry_run=False)
             original = shutil.copytree
-            def lose_mode(*args, **kwargs):
+            def corrupt(*args, **kwargs):
                 result = original(*args, **kwargs)
-                (Path(args[1]) / "run").chmod(0o644)
+                (Path(args[1]) / "SKILL.md").write_text("wrong")
                 return result
-            with patch("aiskillsync.managed_copies.shutil.copytree", side_effect=lose_mode):
-                with self.assertRaisesRegex(ValueError, "executable.*destination"):
+            with patch("aiskillsync.managed_copies.shutil.copytree", side_effect=corrupt):
+                with self.assertRaisesRegex(ValueError, "staged copy differs"):
                     apply_sync_plan(plan)
             self.assertFalse((dest / "x").exists())
 

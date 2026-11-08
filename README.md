@@ -25,14 +25,15 @@ next to the selected config. Keep that state with the config: without it existin
 directories are unowned and will not be replaced. The next sync refreshes an
 unchanged managed tree when its source changes and prunes an unchanged stale
 copy; content edits, added/removed files or directories, or missing/invalid
-ownership block replacement or pruning. File executable bits are tracked and
-preserved; other permission and timestamp changes are not tracked. If the
-filesystem cannot represent the source executable bits (for example a DrvFS
-mount without suitable metadata), apply fails with an explicit error before
-publishing the copy; use a destination supporting Unix modes, such as a WSL
-mount configured with metadata. A dry run cannot verify the destination's mode
-support. Copies recorded by the unreleased 0.1.47 candidate use an older snapshot
-format and require manual backup/removal of the copy and record before resync.
+ownership block replacement or pruning. Source and destination executable bits
+are tracked separately. If a filesystem cannot preserve the source bits (for
+example DrvFS without metadata), sync warns but publishes the copy after
+verifying file contents and tree structure; Unix executability may differ on the
+destination. Enable suitable metadata where Unix execution modes are needed. A
+dry run cannot verify destination mode support. Other permission and timestamp
+changes are not tracked. Copies recorded by the unreleased 0.1.47 candidate use
+an older snapshot format and require manual backup/removal of the copy and record
+before resync. Existing 0.1.48 records remain compatible.
 A symlink already pointing to the correct skill is migrated to a copy. Unowned
 entries and unexpected links are never adopted, including with `--adopt` or
 `--overwrite`. Move or back them up manually first.

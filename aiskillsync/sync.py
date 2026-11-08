@@ -458,7 +458,7 @@ def _plan_copy(config_path: Path, dest_name: str, root: Path, skill: Skill,
             raise ValueError(f"managed copy ownership differs at {status.path}; inspect record {record_file}")
         if status.key != "directory-copy" or managed_copies.snapshot(status.path) != record["snapshot"]:
             raise ValueError(f"managed copy locally modified or missing: {status.path}; preserve and resolve manually")
-        action = "skip" if source_snapshot == record["snapshot"] else "copy-refresh"
+        action = "skip" if source_snapshot == record.get("source_snapshot", record["snapshot"]) else "copy-refresh"
         status = DestinationStatus("managed-copy", "managed copy", status.path, status.detail)
     elif status.key == "missing":
         action = "copy-create"
@@ -652,7 +652,13 @@ def apply_sync_plan(plan: SyncPlan) -> ApplyResult:
                 f"destination changed before prune: {action.destination}:{action.skill.name} "
                 f"is no longer a stale managed symlink"
             )
+    # Retire legacy link ownership before a copy may supersede or remove it.
+    # A failed manifest write must block the corresponding filesystem mutation.
+    for action in plan.actions:
+        if action.copy_record_path is not None and action.status.key == "managed-copy" and action.action == "skip":
+            _forget_copy_profile_links(action)
     for action in plan.copies:
+        _forget_copy_profile_links(action)
         managed_copies.apply_copy(action)
         (pruned if action.action == "copy-prune" else created).append(f"{action.destination}:{action.skill.name}")
     for action in plan.adoptions:
@@ -677,6 +683,25 @@ def projection_manifest_path(config_path: Path) -> Path:
     """Return the per-user projection state kept beside the selected config."""
 
     return config_path.parent / "profile-projections.json"
+
+
+def _forget_copy_profile_links(action: SyncAction) -> None:
+    """Retire all profile link claims at an entry before copy ownership takes over."""
+    assert action.copy_record_path is not None
+    path = action.copy_record_path.parent.parent / "profile-projections.json"
+    if not path.exists():
+        return
+    manifest = _load_projection_manifest(path)
+    key = (_canonical_path(action.destination_root), action.skill.name)
+    changed = False
+    for profile, records in manifest["profiles"].items():
+        retained = [record for record in records
+                    if (Path(record["destination_root"]), record["entry"]) != key]
+        if retained != records:
+            manifest["profiles"][profile] = retained
+            changed = True
+    if changed:
+        atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
 def add_profile_manifest_prunes(plan: SyncPlan, config_path: Path) -> SyncPlan:

@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 import tempfile
 from pathlib import Path
 
@@ -74,6 +75,7 @@ def load_record(path: Path) -> dict | None:
         if (not isinstance(data, dict) or data.get("version") != 1
             or not all(isinstance(data.get(key), str) and data[key] for key in ("destination", "source", "source_root"))
             or not isinstance(data.get("snapshot"), dict)
+            or ("source_snapshot" in data and not isinstance(data["source_snapshot"], dict))
             or not (data.get("profile") is None or isinstance(data.get("profile"), str))):
             raise ValueError("invalid record")
         return data
@@ -131,9 +133,10 @@ def apply_copy(action) -> None:
         if staged_snapshot != action.copy_snapshot:
             def content_only(values):
                 return {name: value.split(":", 1)[-1] for name, value in values.items()}
-            if content_only(staged_snapshot) == content_only(action.copy_snapshot):
-                raise ValueError(f"executable bits cannot be preserved on destination {path}; use a filesystem with Unix metadata enabled")
-            raise ValueError(f"staged copy differs from source: {action.skill.path}")
+            if content_only(staged_snapshot) != content_only(action.copy_snapshot):
+                raise ValueError(f"staged copy differs from source: {action.skill.path}")
+            print(f"WARNING executable bits differ on destination {path}; "
+                  "the destination filesystem may not preserve Unix metadata", file=sys.stderr)
         if action.action == "copy-create":
             if path.exists() or path.is_symlink():
                 raise ValueError(f"destination appeared while copying: {path}")
@@ -155,7 +158,8 @@ def apply_copy(action) -> None:
         record = {"version": 1, "destination": str(path.parent.resolve(strict=False) / path.name),
                   "source": str(action.skill.path.resolve(strict=False)),
                   "source_root": str(action.skill.bridge.skills_dir.resolve(strict=False)),
-                  "profile": action.profile_name, "snapshot": action.copy_snapshot}
+                  "profile": action.profile_name, "snapshot": staged_snapshot,
+                  "source_snapshot": action.copy_snapshot}
         atomic_write_text(record_file, json.dumps(record, indent=2, sort_keys=True) + "\n")
         if backup is not None:
             if backup.is_symlink():
