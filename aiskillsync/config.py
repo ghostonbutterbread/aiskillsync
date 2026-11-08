@@ -93,6 +93,7 @@ class SyncConfig:
     materialization_workers: int = 3
     default_destinations: tuple[str, ...] = ("codex", "claude")
     migration_denylist: tuple[str, ...] = ()
+    copy_destinations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -522,6 +523,10 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
     ):
         raise ConfigError("sync.migration_denylist must be a list of skill names")
 
+    copy_destinations_raw = sync_raw.get("copy_destinations", ())
+    if not isinstance(copy_destinations_raw, (list, tuple)) or not all(isinstance(item, str) and item in destinations for item in copy_destinations_raw):
+        raise ConfigError("sync.copy_destinations must list configured skill destinations")
+
     mode = sync_raw.get("mode", "symlink")
     if not isinstance(mode, str) or not mode:
         raise ConfigError("sync.mode must be a non-empty string")
@@ -559,6 +564,7 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             materialization_workers=materialization_workers,
             default_destinations=tuple(default_destinations_raw),
             migration_denylist=tuple(migration_denylist_raw),
+            copy_destinations=tuple(copy_destinations_raw),
         ),
         profile_sets=tuple(profile_sets),
     )
@@ -683,6 +689,10 @@ def config_to_text(config: Config) -> str:
             lines.append(f"    - {_format_scalar(destination)}")
     else:
         lines.append("  default_destinations: []")
+    if config.sync.copy_destinations:
+        lines.append("  copy_destinations:")
+        for destination in config.sync.copy_destinations:
+            lines.append(f"    - {_format_scalar(destination)}")
     if config.sync.migration_denylist:
         lines.append("  migration_denylist:")
         for skill_name in config.sync.migration_denylist:

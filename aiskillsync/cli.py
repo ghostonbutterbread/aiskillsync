@@ -43,6 +43,7 @@ from .discovery import (
     enabled_skills,
 )
 from .lanes import effective_config, load_active_lanes, resolve_switch, save_active_lane
+from .windows_mount import is_windows_destination
 from .sync import (
     SyncAction,
     SyncPlan,
@@ -653,6 +654,12 @@ def cmd_switch(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     new_config = effective_config(configured, {group: lane})
     new_bridge = next(item for item in new_config.bridges if item.name == new_bridge_name)
     destinations = tuple(args.dest) or configured.sync.default_destinations
+    switch_destinations = (tuple(configured.ai_skill_paths) if configured.profile_sets and not args.dest
+                           else destinations)
+    for name in switch_destinations:
+        root = configured.ai_skill_paths.get(name)
+        if root is not None and (name in configured.sync.copy_destinations or is_windows_destination(root)):
+            raise ConfigError(f"lane switch is unsupported for copy destination {name}; use separate destinations or manually move the copy and its record")
     _ensure_switch_collisions_safe(old_bridge.skills_dir, new_bridge.skills_dir, destinations, configured)
     stale = _lane_stale_links(old_bridge.skills_dir, new_bridge.skills_dir, destinations, configured)
     sync_args = argparse.Namespace(
@@ -869,7 +876,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     # inside the skill source. Compare both the future entry and its current
     # resolved target, so already-projected links and aliased parents are safe.
     projected_skills = tuple(action for action in plan.actions
-                             if action.action in {"link", "adopt", "skip"})
+                             if action.action in {"link", "adopt", "skip", "copy-create", "copy-refresh", "copy-migrate"})
     for agent_plan in agent_plans:
         for agent_action in agent_plan.actions:
             root = agent_action.path.parent.resolve(strict=False)
@@ -897,7 +904,8 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         return 1
 
     if plan.has_blockers:
-        if plan.prunes and not dry_run:
+        copy_blocker = bool(plan.copies) or any(error.startswith(("copy ", "managed copy ")) for error in plan.errors)
+        if plan.prunes and not dry_run and not copy_blocker:
             try:
                 pruned = apply_prune_actions(plan)
                 remove_pruned_profile_manifest_records(plan, config.path)
@@ -921,7 +929,7 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         result = apply_sync_plan(plan)
         update_profile_projection_manifest(plan, config.path)
     except (OSError, ValueError) as exc:
-        print(f"aiskillsync: apply failed: {exc}", file=stderr)
+        print(f"aiskillsync: apply failed; earlier destination actions may have completed, inspect before retrying: {exc}", file=stderr)
         _print_sync_summary(plan, "blocked", stdout)
         return 1
     completed_agent_paths = []
@@ -949,18 +957,22 @@ def cmd_sync(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
                    else f"Created {len(created_agents)} agent symlink(s)")
         print(message if created_agents
               else ("No agent projections needed" if native else "No agent symlinks needed"), file=stdout)
-    if result.pruned:
-        print("Removed stale symlinks:", file=stdout)
-        for item in result.pruned:
-            print(f"  {item}", file=stdout)
-    if result.created:
-        print("Created symlinks:", file=stdout)
-        for item in result.created:
-            print(f"  {item}", file=stdout)
-        if plan.backup_root is not None and plan.adoptions:
-            print(f"Backups written to: {plan.backup_root}", file=stdout)
-    elif not result.pruned:
-        print("No symlinks needed", file=stdout)
+    copy_names = {f"{action.destination}:{action.skill.name}" for action in plan.copies}
+    linked = [item for item in result.created if item not in copy_names]
+    copied = [item for item in result.created if item in copy_names]
+    unlinked = [item for item in result.pruned if item not in copy_names]
+    removed_copies = [item for item in result.pruned if item in copy_names]
+    for label, items in (("Removed stale symlinks:", unlinked), ("Removed stale managed copies:", removed_copies),
+                         ("Created symlinks:", linked), ("Applied managed copies:", copied)):
+        if items:
+            print(label, file=stdout)
+            for item in items:
+                print(f"  {item}", file=stdout)
+    if linked and plan.backup_root is not None and plan.adoptions:
+        print(f"Backups written to: {plan.backup_root}", file=stdout)
+    if not result.created and not result.pruned:
+        print("No symlinks needed" if not any(a.status.key == "managed-copy" for a in plan.actions)
+              else "No managed copies needed", file=stdout)
     _print_sync_summary(plan, "applied", stdout)
     return 0
 
@@ -2402,6 +2414,9 @@ def _format_sync_action(
     elif action.action == "prune":
         verb = "PRUNE"
         color = "blue" if dry_run else "green"
+    elif action.action.startswith("copy-"):
+        verb = action.action.upper()
+        color = "blue" if dry_run else "green"
     elif action.action == "skip":
         verb = "SKIP"
         color = "yellow"
@@ -2438,6 +2453,7 @@ def _print_sync_summary(plan: SyncPlan, final_status: str, stdout: TextIO) -> No
     print(
         "  destination actions: "
         f"linked={destination_counts['linked']}, "
+        + (f"copied={len([a for a in plan.copies if a.action != 'copy-prune'])}, " if plan.copies else "") +
         f"adopted={destination_counts['adopted']}, "
         f"pruned={destination_counts['pruned']}, "
         f"skipped={destination_counts['skipped']}, "
@@ -2490,6 +2506,8 @@ def _is_repo_error(error: str) -> bool:
 def _is_destination_error(error: str) -> bool:
     return (
         error.startswith("destination ")
+        or error.startswith("copy ")
+        or error.startswith("managed copy ")
         or error.startswith("selected destinations ")
         or error.startswith("unknown destination")
         or error == "no destinations selected"

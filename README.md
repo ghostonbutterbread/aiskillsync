@@ -6,6 +6,43 @@ This repo is intended to replace per-project `sync_skills.sh` scripts with one
 config-driven sync layer that can bridge skills from multiple repos into AI
 provider skill directories.
 
+## WSL destinations and managed copies
+
+When a WSL destination is on a detected Windows-backed mount, skill directories
+are copied rather than symlinked so Windows-native tools can read them. Other
+skill destinations keep symlinks. To opt a destination into copies explicitly
+(for example when mount detection cannot identify it), add:
+
+```yaml
+sync:
+  copy_destinations: [windows]
+```
+
+Use an existing name from `ai_skill_paths`. `sync all --dry-run` previews the
+same selection; profile projections and nested files are supported. Copy
+ownership and content snapshots are stored per entry under `managed-copies/`
+next to the selected config. Keep that state with the config: without it existing
+directories are unowned and will not be replaced. The next sync refreshes an
+unchanged managed tree when its source changes and prunes an unchanged stale
+copy; content edits, added/removed files or directories, or missing/invalid
+ownership block replacement or pruning. Permission and timestamp changes alone
+are not tracked.
+A symlink already pointing to the correct skill is migrated to a copy. Unowned
+entries and unexpected links are never adopted, including with `--adopt` or
+`--overwrite`. Move or back them up manually first.
+
+Limitations: `switch` does not support copy destinations; use separate
+destinations or manually move the existing copy and its ownership record.
+Changing a managed copy's source, profile owner, or projection mode is blocked;
+back up and remove the copy and its corresponding record before resyncing. A
+profile prune only covers currently selected destination roots and available
+selected source roots; old roots or removed/disabled sources require manual
+cleanup. Nested symlinks and special files in copied trees are rejected. Do not
+run concurrent syncs or edit a copy while sync runs: snapshot checks are not a
+filesystem lock. A failed/interrupted apply can be partial; inspect destination,
+record, and any `.<skill>.aiskillsync-backup-*` sibling before retrying. A real
+WSL/Windows interoperability test has not yet been performed.
+
 ## Profile-scoped category sync
 
 `aiskillsync` supports both flat and categorized source bridges. A categorized
@@ -102,7 +139,7 @@ explicit-adoption slice of Phase 4 from
 - `list` and `doctor` reporting
 - safe dry-run sync preview
 - sync-only repo clone/pull materialization
-- default `sync` creation of missing symlinks only
+- default `sync` creation of missing symlinks, with managed copies for Windows-backed destinations
 - opt-in `sync --adopt` migration with backups, skill filters, and denylists
 - opt-in `sync --overwrite` repo force-refresh plus destination adoption
 - managed Codex/Claude root-context sync from bridge `root-context/` templates
@@ -114,7 +151,7 @@ and `sync.clone_if_missing` is true, or refresh existing selected enabled git
 repo roots when `sync.pull_before_sync` is true. Independent checkout roots are
 materialized concurrently (three workers by default); bridges sharing a checkout
 remain serialized. Once every selected source is ready, the resulting inventory
-is planned once and fanned out to the requested destinations. It then creates
+is planned once and fanned out to the requested destinations. For symlink destinations it creates
 destination symlinks that are missing. Existing correct symlinks are skipped, and existing
 directories, files, or symlinks to unexpected targets are conflicts that block
 the whole apply. It does not delete, adopt, back up, or replace destination
