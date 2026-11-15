@@ -1,13 +1,13 @@
 # Agent source migration integration dossier
 
-- **Status:** bounded-memory correction complete; parent independent re-review pending
+- **Status:** independent review accepted code; beta integration pending
 - **Owner:** delegated Hermes implementer; parent owns review and integration
 - **Branch / worktree:** `feat/agent-source-migration` / `/home/ryushe/worktrees/aiskillsync-agent-source-migration`
 - **Base commit:** `78b660dc69b10d5e36ed702c5aa50d835b47b6cf`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-11-15
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest prior immutable recovery checkpoint:** `19f60b5554df5559c1d8a37e54c53a6ef6d1feb2` (the bounded-memory correction and this dossier are in the subsequent single commit)
+- **Latest reviewed implementation checkpoint:** `52b2697ef734ea13ced279ca91b591d745365e16` (the later handoff commit records review and increments version only)
 - **Feature implementation commit(s):** `078b8a9e6a80356177f73d905a863e5bfbc28c13`
 - **Inspiration / reference:** explicit request for generic former-source migration; no Hoster state or user config edits authorized.
 
@@ -52,7 +52,7 @@ For unformatted migrations, explicit adoption requires an exact link to the matc
 
 ## Blockers and deferred work
 
-- Independent exact-diff review is required before beta integration; parent owns it. Re-run focused and full tests after corrections and perform beta merge preflight.
+- Independent review approved implementation checkpoint `52b2697ef734ea13ced279ca91b591d745365e16`, including bounded-memory adoption, failure recovery, earlier migration race regressions, and isolated profile behavior. The installed CLI synthetic five-destination/four-role fixture verified 20 projections, backups, complete receipts, model overlays, no-op, and modified-file blocking. Full suite ran 327 tests with one optional OpenCode-loader skip. Parent independently ran the same full suite. Re-run tests after the version-only handoff and verify beta merge.
 - Hoster's actual old sources and 12 roles are not included in this fixture. After separate user authorization and independent review, the parent must preview against a safe copy of those exact contents, verify the 3 edited bodies match generated overlay formatting, then review dry-run output before any live operation. No runtime activation is authorized by this branch.
 - Destination/source reparenting and late writes cannot be fully prevented; stop consumers and concurrent writers and use backup receipts for partial failure recovery.
 - Project Kanban CLI reports delegate child contexts cannot mutate boards; parent owns that coordination.
@@ -60,16 +60,17 @@ For unformatted migrations, explicit adoption requires an exact link to the matc
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest prior immutable recovery checkpoint:** `19f60b5554df5559c1d8a37e54c53a6ef6d1feb2`; this dossier accompanies the subsequent bounded-memory correction commit. Inspect branch tip for its immutable ID.
-- **Exact resume point:** parent independently reviews the full base-to-tip diff, verifies tests and migration fixture against reviewed source content, and decides beta integration; no push or activation has occurred.
+- **Latest reviewed implementation checkpoint:** `52b2697ef734ea13ced279ca91b591d745365e16`; the subsequent handoff commit changes version metadata and this dossier only.
+- **Exact resume point:** verify the handoff version, run beta merge preflight, exclude this dossier, test and integrate. Hoster's real-format compatibility remains unverified and activation is separately gated; no push or activation has occurred.
 - **Working-tree state:** clean after handoff commit, except ignored Python build/cache artifacts.
 
 ## Decision gates
 
-- **Integration:** parent independently reviews exact final branch diff, checks tests and beta compatibility, removes this branch-local dossier during integration.
+- **Integration:** independent full-diff review approved `52b2697ef734ea13ced279ca91b591d745365e16`; parent verifies the version-only handoff and beta compatibility and removes this branch-local dossier during integration.
 - **Activation:** separate operator authorization after non-mutating preview and recovery review.
 - **Promotion:** separate explicit approval.
 
 ## Decision record
 
 - 2026-11-15 — isolated feature started from fetched beta; no merge, push, user config or Hoster modifications.
+- 2026-11-15 — independent correction review approved the reviewed implementation checkpoint. A synthetic migration passed; a real Hoster fixture was blocked by an approval gate and must not be retried or bypassed. Beta integration is separate from Hoster activation.
