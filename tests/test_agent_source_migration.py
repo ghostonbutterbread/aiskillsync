@@ -269,6 +269,72 @@ class AgentSourceMigrationTests(unittest.TestCase):
         self.assertEqual(target.resolve(), self.root / 'src/agents/reviewer.md')
         self.assertEqual((self.root / 'backup/agents/omp/reviewer.md').readlink(), old / 'reviewer.md')
 
+    def test_raw_skip_and_link_reject_source_edits_after_planning(self):
+        old, _, target = self.fixture()
+        self.raw['agent_formats'] = {}
+        self.raw.pop('agent_overlays')
+        config = config_from_mapping(self.raw, self.root / 'config')
+        source = self.root / 'src/agents/reviewer.md'
+        original = source.read_bytes()
+        target.unlink()
+        for action in ('skip', 'link'):
+            with self.subTest(action=action):
+                if action == 'skip':
+                    target.symlink_to(source)
+                plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                             former_agent_sources={'src': old})
+                self.assertEqual(plan.actions[0].action, action)
+                source.write_bytes(original + b'changed')
+                try:
+                    with self.assertRaisesRegex(ValueError, 'source changed'):
+                        apply_agent_sync_plan(plan)
+                    self.assertEqual(target.is_symlink(), action == 'skip')
+                finally:
+                    if target.is_symlink():
+                        target.unlink()
+                    source.write_bytes(original)
+
+    def test_raw_link_source_edit_during_publication_reports_incomplete(self):
+        old, _, target = self.fixture()
+        self.raw['agent_formats'] = {}
+        self.raw.pop('agent_overlays')
+        config = config_from_mapping(self.raw, self.root / 'config')
+        target.unlink()
+        plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                     former_agent_sources={'src': old})
+        link = os.symlink
+        def race(*args, **kwargs):
+            result = link(*args, **kwargs)
+            (self.root / 'src/agents/reviewer.md').write_text('changed')
+            return result
+        with patch('aiskillsync.agents.os.symlink', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete.*source changed'):
+                apply_agent_sync_plan(plan)
+        self.assertTrue(target.is_symlink())
+
+    def test_raw_skip_source_edit_during_other_publication_is_incomplete(self):
+        old, _, target = self.fixture()
+        self.raw['agent_formats'] = {}
+        self.raw.pop('agent_overlays')
+        source = self.root / 'src/agents/reviewer.md'
+        (source.parent / 'writer.md').write_text('---\nname: writer\ndescription: Write\n---\nPrompt\n')
+        config = config_from_mapping(self.raw, self.root / 'config')
+        target.unlink()
+        target.symlink_to(source)
+        plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                     former_agent_sources={'src': old})
+        self.assertEqual([a.action for a in plan.actions], ['skip', 'link'])
+        link = os.symlink
+        def race(*args, **kwargs):
+            result = link(*args, **kwargs)
+            source.write_text('changed')
+            return result
+        with patch('aiskillsync.agents.os.symlink', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete.*source changed'):
+                apply_agent_sync_plan(plan)
+        self.assertTrue(target.is_symlink())
+        self.assertTrue((target.parent / 'writer.md').is_symlink())
+
     def test_raw_source_edit_during_publication_is_incomplete(self):
         old, _, target = self.fixture()
         self.raw['agent_formats'] = {}
@@ -365,6 +431,138 @@ class AgentSourceMigrationTests(unittest.TestCase):
             apply_agent_sync_plan(plan)
         self.assertEqual(stale.readlink(), old / 'deleted.md')
         self.assertEqual(target.read_bytes(), before)
+
+    def test_raw_link_and_skip_succeed_unchanged_with_new_destination(self):
+        old, _, target = self.fixture()
+        self.raw['agent_formats'] = {}
+        self.raw.pop('agent_overlays')
+        config = config_from_mapping(self.raw, self.root / 'config')
+        target.unlink()
+        target.parent.rmdir()
+        for expected in ('link', 'skip'):
+            plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                         former_agent_sources={'src': old})
+            self.assertFalse(plan.has_blockers, plan.errors)
+            self.assertEqual(plan.actions[0].action, expected)
+            apply_agent_sync_plan(plan)
+            self.assertEqual(target.readlink(), self.root / 'src/agents/reviewer.md')
+
+    def test_new_destination_rejects_stale_former_link_during_publication(self):
+        old, _, target = self.fixture()
+        self.raw['agent_formats'] = {}
+        self.raw.pop('agent_overlays')
+        config = config_from_mapping(self.raw, self.root / 'config')
+        target.unlink()
+        target.parent.rmdir()
+        plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                     former_agent_sources={'src': old})
+        self.assertFalse(plan.has_blockers, plan.errors)
+        link = os.symlink
+        stale = target.parent / 'unselected.md'
+        def race(*args, **kwargs):
+            result = link(*args, **kwargs)
+            link(str(old / 'deleted.md'), str(stale))
+            return result
+        with patch('aiskillsync.agents.os.symlink', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete.*destination changed'):
+                apply_agent_sync_plan(plan)
+        self.assertEqual(stale.readlink(), old / 'deleted.md')
+        self.assertTrue(target.is_symlink())
+
+    def test_non_markdown_former_link_already_present_blocks_planning(self):
+        old, config, target = self.fixture()
+        stale = target.parent / 'unselected.txt'
+        stale.symlink_to(old / 'deleted.md')
+        plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                     former_agent_sources={'src': old})
+        self.assertTrue(plan.has_blockers)
+        self.assertIn('former-source agent link', ' '.join(plan.errors))
+        self.assertEqual(stale.readlink(), old / 'deleted.md')
+
+    def test_non_markdown_former_link_inserted_during_publication_blocks(self):
+        old, _, target = self.fixture()
+        self.raw['agent_formats'] = {}
+        self.raw.pop('agent_overlays')
+        config = config_from_mapping(self.raw, self.root / 'config')
+        target.unlink()
+        target.parent.rmdir()
+        plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                     former_agent_sources={'src': old})
+        link = os.symlink
+        stale = target.parent / 'unselected.txt'
+        def race(*args, **kwargs):
+            result = link(*args, **kwargs)
+            link(str(old / 'deleted.md'), str(stale))
+            return result
+        with patch('aiskillsync.agents.os.symlink', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete.*destination changed'):
+                apply_agent_sync_plan(plan)
+        self.assertEqual(stale.readlink(), old / 'deleted.md')
+
+    def test_corrupted_backup_after_publication_keeps_original_and_incomplete_receipt(self):
+        old, config, target = self.fixture()
+        original = target.read_bytes()
+        backup = self.root / 'backup/agents/omp/reviewer.md'
+        plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                     former_agent_sources={'src': old}, backup_root=self.root / 'backup')
+        link = os.link
+        def race(*args, **kwargs):
+            result = link(*args, **kwargs)
+            backup.write_bytes(b'corrupted backup')
+            return result
+        with patch('aiskillsync.agents.os.link', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete.*backup') as error:
+                apply_agent_sync_plan(plan)
+        receipt = Path(json.loads((backup.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data['status'], 'incomplete')
+        self.assertEqual(Path(data['displaced']).read_bytes(), original)
+        self.assertIn(data['displaced'], str(error.exception))
+        self.assertEqual(backup.read_bytes(), b'corrupted backup')
+
+    def test_backup_inode_replacement_at_receipt_finalization_is_incomplete(self):
+        old, config, target = self.fixture()
+        original = target.read_bytes()
+        backup = self.root / 'backup/agents/omp/reviewer.md'
+        plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                     former_agent_sources={'src': old}, backup_root=self.root / 'backup')
+        replace = os.replace
+        def race(*args, **kwargs):
+            result = replace(*args, **kwargs)
+            if args[0] == 'receipt-complete.json':
+                replacement = backup.parent / 'replacement'
+                replacement.write_bytes(original)
+                replace(replacement, backup)
+            return result
+        with patch('aiskillsync.agents.os.replace', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete.*backup.*verified original remains') as error:
+                apply_agent_sync_plan(plan)
+        receipt = Path(json.loads((backup.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data['status'], 'incomplete')
+        self.assertEqual(Path(data['displaced']).read_bytes(), original)
+        self.assertIn(data['displaced'], str(error.exception))
+        self.assertEqual(backup.read_bytes(), original)
+
+    def test_displaced_original_corruption_reports_intact_snapshot(self):
+        old, config, target = self.fixture()
+        original = target.read_bytes()
+        backup = self.root / 'backup/agents/omp/reviewer.md'
+        plan = build_agent_sync_plan(config, ('src',), ('omp',), dry_run=False,
+                                     former_agent_sources={'src': old}, backup_root=self.root / 'backup')
+        link = os.link
+        def race(*args, **kwargs):
+            result = link(*args, **kwargs)
+            receipt = Path(json.loads((backup.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+            displaced = Path(json.loads(receipt.read_text())['displaced'])
+            displaced.write_bytes(b'changed original')
+            return result
+        with patch('aiskillsync.agents.os.link', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'incomplete.*verified snapshot remains.*original.*changed'):
+                apply_agent_sync_plan(plan)
+        receipt = Path(json.loads((backup.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+        self.assertEqual(json.loads(receipt.read_text())['status'], 'incomplete')
+        self.assertEqual(backup.read_bytes(), original)
 
     def test_destination_edit_during_publication_keeps_incomplete_receipt(self):
         old, config, target = self.fixture()

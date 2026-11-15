@@ -397,6 +397,9 @@ def build_agent_sync_plan(
             continue
 
         initial_snapshot = None
+        if former_agent_sources and root_identity is None:
+            # A newly created destination is bound to an empty discovery set.
+            migration_snapshots.append((resolved_root, ()))
         if former_agent_sources and root_identity is not None:
             try:
                 fd = _open_dir(resolved_root)
@@ -415,7 +418,7 @@ def build_agent_sync_plan(
             provider = config.agent_formats.get(destination)
             valid_ids = {_digest(str(agent.path)): agent for agent in discovered}
             for entry in sorted(root.iterdir()):
-                if entry.suffix not in {".md", ".toml"}:
+                if entry.suffix not in {".md", ".toml"} and not (former_agent_sources and entry.is_symlink()):
                     continue
                 if entry.is_file() and not entry.is_symlink():
                     try:
@@ -583,6 +586,12 @@ def build_agent_sync_plan(
                     errors.append(f'agent destination {path}: migration cannot adopt: {exc}')
             else:
                 action = "adopt" if adopt else "conflict"
+            if not provider and former_agent_sources and source_digest is None:
+                try:
+                    source_digest = hashlib.sha256(agent.path.read_bytes()).hexdigest()
+                except OSError as exc:
+                    errors.append(f'cannot snapshot agent source during planning: {agent.path}: {exc}')
+                    continue
             try:
                 previous_bytes = _stable_file_bytes(path) if action in {"refresh", "adopt"} and path.is_file() and not path.is_symlink() else None
             except (OSError, ValueError) as exc:
@@ -770,11 +779,11 @@ def _bytes_at(fd: int, name: str) -> bytes:
 def _agent_directory_snapshot(fd: int) -> tuple[tuple[str, tuple[object, ...], str | None], ...]:
     result = []
     for name in sorted(os.listdir(fd)):
-        if Path(name).suffix not in {'.md', '.toml'}:
-            continue
         state = _entry_at(fd, name)
         if state == ('missing',):
             raise ValueError(f'agent destination changed while inspecting: {name}')
+        if Path(name).suffix not in {'.md', '.toml'} and not stat.S_ISLNK(state[2]):
+            continue
         digest = hashlib.sha256(_bytes_at(fd, name)).hexdigest() if stat.S_ISREG(state[2]) else None
         if _entry_at(fd, name) != state:
             raise ValueError(f'agent destination changed while inspecting: {name}')
@@ -809,6 +818,37 @@ def _snapshot(src_fd: int, name: str, dst_fd: int, dst_name: str) -> None:
             os.close(child_src)
     else:
         raise ValueError(f"unsupported agent destination type: {name}")
+
+
+def _backup_evidence(fd: int, name: str) -> tuple[tuple[Any, ...], Any]:
+    """Capture inode-bound backup tree state and content without following links."""
+    state = _entry_at(fd, name)
+    if state == ('missing',):
+        raise ValueError(f'backup entry missing: {name}')
+    if stat.S_ISREG(state[2]):
+        content = _bytes_at(fd, name)
+    elif stat.S_ISLNK(state[2]):
+        content = state[-1]
+    elif stat.S_ISDIR(state[2]):
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            if _fd_identity(child) != state[:2]:
+                raise ValueError(f'backup directory changed: {name}')
+            content = tuple((entry, _backup_evidence(child, entry)) for entry in sorted(os.listdir(child)))
+        finally:
+            os.close(child)
+    else:
+        raise ValueError(f'unsupported backup entry: {name}')
+    if _entry_at(fd, name) != state:
+        raise ValueError(f'backup entry changed while reading: {name}')
+    return state, content
+
+
+def _backup_content(evidence: tuple[tuple[Any, ...], Any]) -> Any:
+    state, content = evidence
+    if stat.S_ISDIR(state[2]):
+        return ('directory', tuple((name, _backup_content(child)) for name, child in content))
+    return ('link' if stat.S_ISLNK(state[2]) else 'file', content)
 
 
 def _atomic_rename_primitive():
@@ -884,6 +924,7 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
     backup_parents: dict[Path, Path] = {}
     receipts: list[tuple[int, AgentAction, Path, Path]] = []
     finalized: list[tuple[int, AgentAction, Path, Path]] = []
+    backup_evidence: dict[Path, tuple[int, object, object]] = {}
     created: list[str] = []
     completed: list[Path] = []
     published: dict[Path, tuple[tuple[object, ...], bytes | None]] = {}
@@ -936,7 +977,10 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
         if adoptions and plan.backup_root is None:
             raise ValueError('agent adoption requires a backup root')
         for root, snapshot in migration_snapshots.items():
-            if root not in roots or _agent_directory_snapshot(roots[root]) != snapshot:
+            if root in roots:
+                if _agent_directory_snapshot(roots[root]) != snapshot:
+                    raise ValueError(f'agent destination changed before apply: {root}')
+            elif snapshot or any(a.root_path == root and a.root_identity is not None for a in plan.actions):
                 raise ValueError(f'agent destination changed before apply: {root}')
         for action in adoptions:
             assert plan.backup_root is not None
@@ -1002,7 +1046,13 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                     _validate_bound(backup_fd, plan, backup.name, tuple(protected_fds))
                     _validate_bound(backup_fd, plan, backup.name + '.receipt.json', tuple(protected_fds))
                     _write_exclusive(backup_fd, backup.name + '.receipt.json', json.dumps({'receipt': str(private_path / 'receipt.json')}).encode())
+                    original_evidence = _backup_evidence(root_fd, action.path.name)
+                    if original_evidence[0] != action.expected_state:
+                        raise ValueError(f'agent destination changed before snapshot: {action.path}')
                     _snapshot(root_fd, action.path.name, backup_fd, backup.name)
+                    snapshot_evidence = _backup_evidence(backup_fd, backup.name)
+                    if _backup_content(snapshot_evidence) != _backup_content(original_evidence):
+                        raise ValueError(f'agent backup differs from original: {backup}; original remains at {action.path}')
                     if _entry_at(root_fd, action.path.name) != action.expected_state:
                         raise ValueError(f'agent destination changed during snapshot: {action.path}; receipt: {private_path / "receipt.json"}')
                     if action.previous_bytes is not None and _bytes_at(backup_fd, backup.name) != action.previous_bytes:
@@ -1013,6 +1063,8 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                         raise ValueError(f'agent destination changed at displacement: {action.path}; receipt: {private_path / "receipt.json"}')
                     if action.previous_bytes is not None and _bytes_at(private_fd, 'displaced') != action.previous_bytes:
                         raise ValueError(f'agent destination changed during displacement: {action.path}')
+                    receipts.append((os.dup(private_fd), action, backup, private_path))
+                    backup_evidence[private_path] = (os.dup(backup_fd), snapshot_evidence, original_evidence)
                     _assert_root(action, root_fd)
                 if action.content is not None:
                     if private_fd is None:
@@ -1040,11 +1092,6 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                     if state == ('missing',) or state[-1] != str(action.agent.path):
                         raise ValueError(f'agent destination changed during publication: {action.path}')
                     published[action.path] = (state, None)
-                if backup is not None:
-                    assert private_fd is not None and private_path is not None
-                    # Keep receipts incomplete until all destination roots have
-                    # survived all actions, including actions at other roots.
-                    receipts.append((os.dup(private_fd), action, backup, private_path))
                 if action.root_path in migration_snapshots:
                     snapshot = _agent_directory_snapshot(root_fd)
                     previous = migration_snapshots[action.root_path]
@@ -1067,6 +1114,25 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                 if parent_fd is not None:
                     os.close(parent_fd)
         def verify_roots() -> None:
+            for receipt_fd, item, backup, private_path in receipts:
+                saved_fd, expected_backup, expected_original = backup_evidence[private_path]
+                displaced = private_path / 'displaced'
+                try:
+                    original_ok = (_directory_identity(private_path) == _fd_identity(receipt_fd) and
+                                   _backup_evidence(receipt_fd, 'displaced') == expected_original)
+                except (OSError, ValueError):
+                    original_ok = False
+                try:
+                    backup_ok = (_directory_identity(backup.parent) == _fd_identity(saved_fd) and
+                                 _backup_evidence(saved_fd, backup.name) == expected_backup)
+                except (OSError, ValueError):
+                    backup_ok = False
+                if not original_ok or not backup_ok:
+                    original_note = (f'verified original remains at {displaced}' if original_ok else
+                                     f'original at {displaced} is missing or changed')
+                    backup_note = (f'verified snapshot remains at {backup}' if backup_ok else
+                                   f'backup snapshot at {backup} is missing or changed')
+                    raise ValueError(f'{backup_note}; {original_note}; receipt: {private_path / "receipt.json"}')
             for item in plan.actions:
                 assert item.root_path is not None
                 if item.root_path in roots:
@@ -1118,3 +1184,5 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
             os.close(fd)
         for receipt_fd, _, _, _ in receipts:
             os.close(receipt_fd)
+        for backup_fd, _, _ in backup_evidence.values():
+            os.close(backup_fd)

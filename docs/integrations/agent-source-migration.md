@@ -1,13 +1,13 @@
 # Agent source migration integration dossier
 
-- **Status:** reviewer blockers corrected; independent re-review pending
+- **Status:** second independent-review blockers corrected; parent re-review pending
 - **Owner:** delegated Hermes implementer; parent owns review and integration
 - **Branch / worktree:** `feat/agent-source-migration` / `/home/ryushe/worktrees/aiskillsync-agent-source-migration`
 - **Base commit:** `78b660dc69b10d5e36ed702c5aa50d835b47b6cf`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-11-15
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest prior immutable recovery checkpoint:** `ba60060d08a3d12875ecfb24110a0282e8ed249c` (this dossier is included in the subsequent correction commit)
+- **Latest prior immutable recovery checkpoint:** `cb56f42b8e90849a2d369fbf6ac63fe785a4b0d2` (the second correction and this dossier are in the subsequent single commit)
 - **Feature implementation commit(s):** `078b8a9e6a80356177f73d905a863e5bfbc28c13`
 - **Inspiration / reference:** explicit request for generic former-source migration; no Hoster state or user config edits authorized.
 
@@ -34,6 +34,14 @@ For unformatted migrations, explicit adoption requires an exact link to the matc
 - Isolated package installation and CLI both report 0.1.56. `git diff --check` passes. The full suite includes nonmigration clone/pull and profile tests.
 - Parent must independently review the full corrected branch diff, including exact former-link validation, selected/unselected link scans, preview/apply operator boundary, and publication/receipt race checks. These fixes are not an accepted review or deployment.
 
+### Second independent-review correction receipts
+
+- Raw migration `skip` and `link` now fingerprint current source bytes, rechecking preflight and final verification; a post-plan edit blocks without altering the destination, while a publication-time edit yields an incomplete apply. An initially absent migration destination is bound to an empty discovery snapshot on creation; stale former-source links of any suffix block or invalidate apply.
+- Before completion, every adoption/refresh receipt verifies the retained snapshot and displaced original recursively, including inode and bytes or symlink text; checks repeat around receipt finalization. On a mismatch, the failure identifies which retained copy was verified at that instant. This includes nonmigration adoption receipts; unchanged directory and symlink adoption remain supported. These checks do not lock the filesystem and cannot prevent later writes or moves.
+- RED on `cb56f42b8e90849a2d369fbf6ac63fe785a4b0d2`: raw skip/link edits and publication edit returned success; backup corruption and replacement, displaced corruption, missing-root stale link, skip mutation during another publication, and already-present non-markdown former link each failed their new expected-error/blocker assertions. Non-markdown insertion was also observed RED against the intermediate correction. Green controls cover unchanged raw link/skip, existing migration backups, and ordinary adoption.
+- Final isolated per-command `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, and worktree-first `PYTHONPATH`: migration suite 35 passed; refresh suite 30 passed; full suite 322 run, 1 skipped (`OPENCODE_TEST_BIN` not supplied), otherwise passed. Full suite prints expected simulated rollback diagnostics. Isolated install, package metadata and CLI report 0.1.57. No persistent shell exports were used.
+- Parent must re-review the exact correction and full feature, including backup/inode checks, root snapshots and manual recovery semantics; no merge, push, Hoster access, or activation performed.
+
 ## Blockers and deferred work
 
 - Independent exact-diff review is required before beta integration; parent owns it. Re-run focused and full tests after corrections and perform beta merge preflight.
@@ -44,7 +52,7 @@ For unformatted migrations, explicit adoption requires an exact link to the matc
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest prior immutable recovery checkpoint:** `ba60060d08a3d12875ecfb24110a0282e8ed249c`; this dossier accompanies the subsequent correction commit. Inspect branch tip for its immutable ID.
+- **Latest prior immutable recovery checkpoint:** `cb56f42b8e90849a2d369fbf6ac63fe785a4b0d2`; this dossier accompanies the subsequent correction commit. Inspect branch tip for its immutable ID.
 - **Exact resume point:** parent independently reviews the full base-to-tip diff, verifies tests and migration fixture against reviewed source content, and decides beta integration; no push or activation has occurred.
 - **Working-tree state:** clean after handoff commit, except ignored Python build/cache artifacts.
 
