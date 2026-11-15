@@ -1,13 +1,13 @@
 # Agent source migration integration dossier
 
-- **Status:** second independent-review blockers corrected; parent re-review pending
+- **Status:** bounded-memory correction complete; parent independent re-review pending
 - **Owner:** delegated Hermes implementer; parent owns review and integration
 - **Branch / worktree:** `feat/agent-source-migration` / `/home/ryushe/worktrees/aiskillsync-agent-source-migration`
 - **Base commit:** `78b660dc69b10d5e36ed702c5aa50d835b47b6cf`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-11-15
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest prior immutable recovery checkpoint:** `cb56f42b8e90849a2d369fbf6ac63fe785a4b0d2` (the second correction and this dossier are in the subsequent single commit)
+- **Latest prior immutable recovery checkpoint:** `19f60b5554df5559c1d8a37e54c53a6ef6d1feb2` (the bounded-memory correction and this dossier are in the subsequent single commit)
 - **Feature implementation commit(s):** `078b8a9e6a80356177f73d905a863e5bfbc28c13`
 - **Inspiration / reference:** explicit request for generic former-source migration; no Hoster state or user config edits authorized.
 
@@ -42,6 +42,14 @@ For unformatted migrations, explicit adoption requires an exact link to the matc
 - Final isolated per-command `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, and worktree-first `PYTHONPATH`: migration suite 35 passed; refresh suite 30 passed; full suite 322 run, 1 skipped (`OPENCODE_TEST_BIN` not supplied), otherwise passed. Full suite prints expected simulated rollback diagnostics. Isolated install, package metadata and CLI report 0.1.57. No persistent shell exports were used.
 - Parent must re-review the exact correction and full feature, including backup/inode checks, root snapshots and manual recovery semantics; no merge, push, Hoster access, or activation performed.
 
+### Bounded backup-evidence correction
+
+- Independent review found `19f60b5` retained all bytes in both evidence trees even for ordinary directory adoption. TDD RED on that commit: real nonmigration apply of 32 × 256 KiB files with a symlink peaked at **24.20 MiB** traced allocations, failing the **2 MiB** limit. With streaming SHA-256 evidence and 128 KiB copying, the same test measured **0.53–0.54 MiB**. This is tracemalloc during apply, not RSS or a guarantee for arbitrary tree shape.
+- Content evidence is SHA-256 (collision resistance, not mathematical byte equality), with inode/entry state and no-follow stable fd checks; link text remains literal. Tests exercise same-size/mtime-restored nested corruption and same-content inode replacement in both snapshot and displaced trees, corruption before displacement, fd-open swaps, mid-read edits and dangling links. Existing migration/race controls remain intact; the concurrent snapshot creation test now hooks exclusive `os.open` and asserts it fired.
+- Bounds: content buffering is independent of total directory file bytes, but evidence and directory listings grow with entry count and recursion depth; SHA-256 requires repeated full-tree reads around receipt finalization. Existing direct regular-file planning/comparison and migration snapshot paths can still retain whole individual files in memory; this change does not claim a global constant-memory apply. Filesystem races and post-verification mutation remain possible; stop concurrent writers.
+- Final isolated per-command environment with worktree-first `PYTHONPATH`: migration 35 passed; refresh 35 passed; agent suite 80 run, 1 skipped; full suite 327 run, 1 skipped (`OPENCODE_TEST_BIN` absent), otherwise passed. Full suite emits expected simulated rollback diagnostics. The first full run exposed a stale mock hook after the copy implementation changed; it was retargeted to the actual exclusive open, asserted fired, and full suite reran green. Isolated wheel install, CLI and package metadata report 0.1.58. No persistent environment exports.
+- Parent must re-review the complete feature and this correction, including content-hash assumptions and memory limits. The remote fixture export remains blocked; do not attempt or route around it. No Hoster access, merge, push or deployment was performed.
+
 ## Blockers and deferred work
 
 - Independent exact-diff review is required before beta integration; parent owns it. Re-run focused and full tests after corrections and perform beta merge preflight.
@@ -52,7 +60,7 @@ For unformatted migrations, explicit adoption requires an exact link to the matc
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest prior immutable recovery checkpoint:** `cb56f42b8e90849a2d369fbf6ac63fe785a4b0d2`; this dossier accompanies the subsequent correction commit. Inspect branch tip for its immutable ID.
+- **Latest prior immutable recovery checkpoint:** `19f60b5554df5559c1d8a37e54c53a6ef6d1feb2`; this dossier accompanies the subsequent bounded-memory correction commit. Inspect branch tip for its immutable ID.
 - **Exact resume point:** parent independently reviews the full base-to-tip diff, verifies tests and migration fixture against reviewed source content, and decides beta integration; no push or activation has occurred.
 - **Working-tree state:** clean after handoff commit, except ignored Python build/cache artifacts.
 

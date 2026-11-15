@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from unittest.mock import patch
 
@@ -29,6 +30,135 @@ class AgentRefreshTests(unittest.TestCase):
     def plan(self, adopt=False):
         return build_agent_sync_plan(config_from_mapping(self.raw, self.root / 'config'), ('src',), ('test',),
                                      dry_run=False, adopt=adopt, backup_root=self.backup)
+
+    def test_directory_adoption_has_bounded_content_memory(self):
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.mkdir()
+        payload = b'x' * (256 * 1024)
+        for i in range(32):
+            (target / f'{i:02d}').write_bytes(payload)
+        (target / 'relative-link').symlink_to('00')
+        plan = self.plan(adopt=True)
+        self.assertFalse(plan.has_blockers, plan.errors)
+        tracemalloc.start()
+        try:
+            apply_agent_sync_plan(plan)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        print(f'directory adoption traced peak: {peak / 1024 / 1024:.2f} MiB')
+        self.assertLess(peak, 2 * 1024 * 1024)
+        backup = self.backup / 'agents/test/reviewer.md'
+        self.assertEqual((backup / '31').read_bytes(), payload)
+        self.assertEqual(os.readlink(backup / 'relative-link'), '00')
+        self.assertTrue(target.is_symlink())
+
+    def test_directory_adoption_detects_nested_copy_corruption_and_inode_swaps(self):
+        for which in ('backup-corrupt', 'original-corrupt', 'backup-inode', 'original-inode'):
+            with self.subTest(which=which), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.dest = root / 'dest'
+                self.backup = root / 'backup'
+                self.raw['ai_agent_paths']['test'] = str(self.dest)
+                self.dest.mkdir()
+                target = self.dest / 'reviewer.md'
+                target.mkdir()
+                (target / 'nested').mkdir()
+                (target / 'nested/file').write_bytes(b'original')
+                (target / 'dangling').symlink_to('../missing')
+                plan = self.plan(adopt=True)
+                backup = self.backup / 'agents/test/reviewer.md'
+                symlink = os.symlink
+                def race(*args, **kwargs):
+                    result = symlink(*args, **kwargs)
+                    if args[1] != 'reviewer.md':
+                        return result
+                    receipt = Path(json.loads((backup.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+                    displaced = Path(json.loads(receipt.read_text())['displaced'])
+                    tree = backup if which.startswith('backup') else displaced
+                    file = tree / 'nested/file'
+                    before = file.stat()
+                    if which.endswith('corrupt'):
+                        file.write_bytes(b'changed!')
+                        os.utime(file, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    else:
+                        replacement = file.with_name('replacement')
+                        replacement.write_bytes(b'original')
+                        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+                        os.replace(replacement, file)
+                    return result
+                with patch('aiskillsync.agents.os.symlink', side_effect=race):
+                    with self.assertRaisesRegex(ValueError, 'incomplete.*(backup|original)'):
+                        apply_agent_sync_plan(plan)
+                receipt = Path(json.loads((backup.parent / 'reviewer.md.receipt.json').read_text())['receipt'])
+                details = json.loads(receipt.read_text())
+                self.assertEqual(details['status'], 'incomplete')
+                self.assertEqual(os.readlink(backup / 'dangling'), '../missing')
+                self.assertEqual(os.readlink(Path(details['displaced']) / 'dangling'), '../missing')
+                intact = Path(details['displaced']) if which.startswith('backup') else backup
+                self.assertEqual((intact / 'nested/file').read_bytes(), b'original')
+
+    def test_directory_snapshot_corruption_blocks_before_displacement(self):
+        import aiskillsync.agents as agents
+        self.dest.mkdir()
+        target = self.dest / 'reviewer.md'
+        target.mkdir()
+        (target / 'file').write_bytes(b'original')
+        plan = self.plan(adopt=True)
+        backup = self.backup / 'agents/test/reviewer.md'
+        snapshot = agents._snapshot
+        def corrupt(src_fd, name, dst_fd, dst_name):
+            snapshot(src_fd, name, dst_fd, dst_name)
+            if dst_name == 'reviewer.md':
+                (backup / 'file').write_bytes(b'changed!')
+        with patch('aiskillsync.agents._snapshot', side_effect=corrupt):
+            with self.assertRaisesRegex(ValueError, 'backup differs from original'):
+                apply_agent_sync_plan(plan)
+        self.assertTrue(target.is_dir())
+        self.assertEqual((target / 'file').read_bytes(), b'original')
+        self.assertEqual((backup / 'file').read_bytes(), b'changed!')
+
+    def test_streaming_evidence_rejects_replaced_inode_during_open(self):
+        from aiskillsync.agents import _backup_evidence
+        file = self.root / 'entry'
+        file.write_bytes(b'same data')
+        replacement = self.root / 'replacement'
+        replacement.write_bytes(b'same data')
+        st = file.stat()
+        os.utime(replacement, ns=(st.st_atime_ns, st.st_mtime_ns))
+        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, root_fd)
+        original_open = os.open
+        def swap_before_open(path, flags, *args, **kwargs):
+            if path == 'entry' and kwargs.get('dir_fd') == root_fd:
+                os.replace(replacement, file)
+            return original_open(path, flags, *args, **kwargs)
+        with patch('aiskillsync.agents.os.open', side_effect=swap_before_open):
+            with self.assertRaisesRegex(ValueError, 'changed while opening'):
+                _backup_evidence(root_fd, 'entry')
+        self.assertEqual(file.read_bytes(), b'same data')
+
+    def test_streaming_evidence_rejects_edit_during_read_with_restored_mtime(self):
+        from aiskillsync.agents import _backup_evidence
+        file = self.root / 'entry'
+        file.write_bytes(b'original')
+        st = file.stat()
+        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, root_fd)
+        fstat = os.fstat
+        calls = 0
+        def edit_at_second_stat(fd):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                file.write_bytes(b'changed!')
+                os.utime(file, ns=(st.st_atime_ns, st.st_mtime_ns))
+            return fstat(fd)
+        with patch('aiskillsync.agents.os.fstat', side_effect=edit_at_second_stat):
+            with self.assertRaisesRegex(ValueError, 'changed while reading'):
+                _backup_evidence(root_fd, 'entry')
+        self.assertEqual(file.read_bytes(), b'changed!')
 
     def test_source_crlf_only_change_invalidates_plan(self):
         self.raw['agent_formats'] = {'test': 'omp'}

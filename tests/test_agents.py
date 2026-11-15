@@ -417,15 +417,18 @@ agent_overlays:
         plan = build_agent_sync_plan(config_from_mapping(self.raw, self.config), ("bbh",), ("claude",),
                                      dry_run=False, adopt=True, backup_root=backup)
         saved = backup / "agents" / "claude" / "reviewer.md"
-        import aiskillsync.agents as agents
-        real_write = agents._write_exclusive
-        def race(fd, name, data):
-            if name == saved.name:
+        real_open = os.open
+        fired = False
+        def race(name, flags, *args, **kwargs):
+            nonlocal fired
+            if name == saved.name and flags & os.O_EXCL:
+                fired = True
                 saved.write_text("concurrent backup")
-            return real_write(fd, name, data)
-        with patch("aiskillsync.agents._write_exclusive", side_effect=race):
+            return real_open(name, flags, *args, **kwargs)
+        with patch("aiskillsync.agents.os.open", side_effect=race):
             with self.assertRaisesRegex(ValueError, "incomplete.*backup"):
                 apply_agent_sync_plan(plan)
+        self.assertTrue(fired)
         self.assertEqual(saved.read_text(), "concurrent backup")
         self.assertEqual(target.read_text(), "original")
 

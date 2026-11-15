@@ -776,6 +776,37 @@ def _bytes_at(fd: int, name: str) -> bytes:
         os.close(file_fd)
 
 
+def _digest_at(fd: int, name: str, copy_to: tuple[int, str] | None = None) -> bytes:
+    """Hash, and optionally copy, one stable no-follow regular file in chunks."""
+    state = _entry_at(fd, name)
+    file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    try:
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != state[:2]:
+            raise ValueError(f'file changed while opening: {name}')
+        digest = hashlib.sha256()
+        with os.fdopen(file_fd, 'rb', closefd=False) as source:
+            if copy_to is None:
+                while chunk := source.read(128 * 1024):
+                    digest.update(chunk)
+            else:
+                dst_fd, dst_name = copy_to
+                output_fd = os.open(dst_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                    0o600, dir_fd=dst_fd)
+                with os.fdopen(output_fd, 'wb') as output:
+                    while chunk := source.read(128 * 1024):
+                        digest.update(chunk)
+                        output.write(chunk)
+        after = os.fstat(file_fd)
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                or _entry_at(fd, name) != state):
+            raise ValueError(f'file changed while reading: {name}')
+        return digest.digest()
+    finally:
+        os.close(file_fd)
+
+
 def _agent_directory_snapshot(fd: int) -> tuple[tuple[str, tuple[object, ...], str | None], ...]:
     result = []
     for name in sorted(os.listdir(fd)):
@@ -802,7 +833,7 @@ def _snapshot(src_fd: int, name: str, dst_fd: int, dst_name: str) -> None:
     if stat.S_ISLNK(info.st_mode):
         os.symlink(os.readlink(name, dir_fd=src_fd), dst_name, dir_fd=dst_fd)
     elif stat.S_ISREG(info.st_mode):
-        _write_exclusive(dst_fd, dst_name, _bytes_at(src_fd, name))
+        _digest_at(src_fd, name, (dst_fd, dst_name))
     elif stat.S_ISDIR(info.st_mode):
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         child_src = os.open(name, flags, dir_fd=src_fd)
@@ -826,7 +857,7 @@ def _backup_evidence(fd: int, name: str) -> tuple[tuple[Any, ...], Any]:
     if state == ('missing',):
         raise ValueError(f'backup entry missing: {name}')
     if stat.S_ISREG(state[2]):
-        content = _bytes_at(fd, name)
+        content = _digest_at(fd, name)
     elif stat.S_ISLNK(state[2]):
         content = state[-1]
     elif stat.S_ISDIR(state[2]):
