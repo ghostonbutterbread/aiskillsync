@@ -348,11 +348,13 @@ def config_from_mapping(raw: Any, path: Path) -> Config:
             fields = overlay.get("frontmatter", {})
             if not isinstance(fields, dict):
                 raise ConfigError(f"{context}.frontmatter must be a mapping")
-            supported = {"thinkingLevel", "autoloadSkills", "tools", "spawns", "blocking", "readSummarize"}
+            supported = {"model", "thinkingLevel", "autoloadSkills", "tools", "spawns", "blocking", "readSummarize"}
             if set(fields) - supported:
                 raise ConfigError(f"{context}.frontmatter contains unsupported fields: {', '.join(sorted(map(str, set(fields) - supported)))}")
             for key, value in fields.items():
-                if key == "thinkingLevel":
+                if key == "model":
+                    valid = _nonempty_single_line(value)
+                elif key == "thinkingLevel":
                     valid = isinstance(value, str) and value in {"inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"}
                 elif key in {"blocking", "readSummarize"}:
                     valid = isinstance(value, bool)

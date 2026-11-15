@@ -408,7 +408,7 @@ OpenCode writes `<name>.md` with `mode: subagent` and `permission.task: deny`.
 The OpenCode permission prohibits child delegation; it does not restrict other
 tools or automatically preload skills. OMP writes `<name>.md` with OMP name,
 description, optional configured frontmatter, and canonical body.
-No model is pinned. Codex can use its supported per-spawn model setting;
+No model is pinned by default. Codex can use its supported per-spawn model setting;
 OpenCode model selection depends on the installed version and launch surface,
 and an unpinned agent does not itself add per-invocation model selection.
 Runtime permissions, skills, and provider availability must be evaluated separately.
@@ -432,12 +432,13 @@ agent_overlays:
       instructions: Do not spawn nested task children.
 ```
 
-`frontmatter` supports `thinkingLevel`, `autoloadSkills`, `tools`, `spawns`,
+`frontmatter` supports `model`, `thinkingLevel`, `autoloadSkills`, `tools`, `spawns`,
 `blocking`, and `readSummarize` in the documented config subset. Use nonempty
 string lists for skills and spawn names, a string list (possibly empty) for
 tools, `"*"` for unrestricted spawns, and booleans for the last two fields.
-`model` and other fields are rejected rather than silently ignored; the
-projection never pins a model. `instructions` is optional single-line text
+`model` is an optional nonempty single-line provider/model identifier; specifying
+it pins that role's OMP model, subject to the runtime's availability. Other
+unsupported fields are rejected rather than silently ignored. `instructions` is optional single-line text
 appended to the source body. Unknown overlays or roles not present in the
 selected source set block the plan; include the owning source when selecting
 repos. Before adopting existing raw OMP links or local definitions, inspect
@@ -471,6 +472,35 @@ locate the moved directory and recovery artifacts before reconciling.
 A source removal, malformed source, rename or format change blocks on
 identifiable stale managed files; review and retire them manually rather than
 leaving them active silently.
+
+For a deliberate source move, `agents --former-agent-source BRIDGE=/absolute/old/agents`
+is a separate explicit migration mode (repeat for different selected bridges).
+First inspect both source directories, existing files and overlays, then run it
+with `--dry-run`. Migration never clones, fetches, or pulls selected sources,
+even if normal sync is configured to do so. All selected checkouts and agent
+directories must already exist and satisfy configured branch checks before
+preview or apply. If updates are needed, fetch and fast-forward them separately,
+then re-preview. Preview is not a persisted authorization token: keep sources
+stable between preview and apply and re-preview after any change. Ordinary
+non-migration sync retains its configured materialization behavior. The former
+directory must exist and not overlap configured
+sources or destinations. Each old file must bind to the same source filename,
+role name and native provider, and its entire body must equal the former source
+rendered with the explicitly configured overlay. A modified file with unknown
+edits is a conflict even when `--adopt` is also supplied. Where edits leave a
+prior marker checksum, it must match a rendering using a subset of the supplied
+overlay fields. Files that differ in formatting or content need manual review;
+the command does not infer overlays or accept arbitrary edits. Migration backs
+up the exact old bytes using the normal recovery index before replacement.
+For unformatted destinations, `--adopt` permits only an exact symlink to the
+matching regular former-source file with valid matching role metadata; unrelated
+files and links remain conflicts. The backup retains the old link text and the
+source bytes are checked for changes during the operation. Former-source links
+under unselected or stale names also block rather than being silently left active.
+Unrelated stale entries still block, and a subsequent ordinary sync is
+idempotent. Run migration only with consumers stopped and source/destination
+directories stable; filesystem races and partial failure still require manual
+reconciliation from the reported backup and receipt.
 Unmatched markers from other profiles sharing a destination also block: select
 the complete owning sources or reconcile the paths manually. Markers removed or
 destroyed by an external edit cannot be identified as managed without a manifest.
