@@ -1,14 +1,14 @@
 # Agent source migration integration dossier
 
-- **Status:** feature; independent review pending
+- **Status:** feature handoff; independent review pending
 - **Owner:** delegated Hermes implementer; parent owns review and integration
 - **Branch / worktree:** `feat/agent-source-migration` / `/home/ryushe/worktrees/aiskillsync-agent-source-migration`
 - **Base commit:** `78b660dc69b10d5e36ed702c5aa50d835b47b6cf`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-11-15
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest immutable recovery checkpoint:** none yet (implementation commit is the next action)
-- **Feature implementation commit(s):** none yet
+- **Latest immutable recovery checkpoint:** `078b8a9e6a80356177f73d905a863e5bfbc28c13` (implementation; followed by version and dossier handoff commit)
+- **Feature implementation commit(s):** `078b8a9e6a80356177f73d905a863e5bfbc28c13`
 - **Inspiration / reference:** explicit request for generic former-source migration; no Hoster state or user config edits authorized.
 
 ## Intent and implemented contract
@@ -21,7 +21,7 @@ Support optional validated OMP model overlays and explicit `agents --former-agen
 - `PYTHONPATH="$PWD" python3 -m unittest discover -s tests -p test_agent_source_migration.py -v`: 18 passed, includes real CLI dry-run/apply, model validation/config roundtrip, old modified marker, source overlap, races, backups and partial receipt, native providers and idempotence.
 - `PYTHONPATH="$PWD" python3 -m unittest discover -s tests -p test_agent_refresh.py -v`: 30 passed.
 - `PYTHONPATH="$PWD" python3 -m unittest discover -s tests`: 305 run, 1 skipped, otherwise passed.
-- `python3 -m aiskillsync --version` and isolated `/usr/bin/python3 -m pip install --no-deps --no-build-isolation --target ... .` with package metadata query: 0.1.54.
+- At implementation checkpoint, `python3 -m aiskillsync --version` and isolated `/usr/bin/python3 -m pip install --no-deps --no-build-isolation --target ... .` with package metadata query: 0.1.54. After the required handoff version bump, the isolated install, CLI and package metadata all returned 0.1.55; focused and full suites were rerun with the final version.
 - **Independent review:** pending, assigned to parent; specifically review source/path race boundaries, stale-owner scans, subset marker verification, exact comparison, backup/incomplete semantics, and Hoster's reviewed file layout against renderer.
 - **Merge/ancestry evidence:** base equals fetched `origin/beta`; no merge or push authorized.
 
@@ -35,9 +35,9 @@ Support optional validated OMP model overlays and explicit `agents --former-agen
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest immutable recovery checkpoint / implementation:** pending first commit.
-- **Exact resume point:** commit implementation, then commit a dossier-only handoff update recording its actual SHA and bump version per `AGENTS.md`.
-- **Working-tree state:** task-owned changes pending first commit.
+- **Latest immutable recovery checkpoint / implementation:** `078b8a9e6a80356177f73d905a863e5bfbc28c13`; branch tip also contains a later dossier/version-only handoff commit.
+- **Exact resume point:** parent independently reviews the full base-to-tip diff, verifies tests and migration fixture against reviewed source content, and decides beta integration; no push or activation has occurred.
+- **Working-tree state:** clean after handoff commit, except ignored Python build/cache artifacts.
 
 ## Decision gates
 
