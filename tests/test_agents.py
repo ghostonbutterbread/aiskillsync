@@ -266,7 +266,7 @@ agent_overlays:
     def test_omp_overlay_rejects_invalid_fields_and_unenforceable_empty_spawns(self):
         self.raw['agent_formats'] = {'claude': 'omp'}
         invalid = [
-            {'frontmatter': {'model': 'provider/fixed'}},
+            {'frontmatter': {'model': ''}},
             {'frontmatter': {'thinking-level': 'max'}},
             {'frontmatter': {'spawns': []}},
             {'frontmatter': {'autoloadSkills': []}},

@@ -266,6 +266,8 @@ def build_parser() -> argparse.ArgumentParser:
     agents_parser.add_argument("--profile", help="profile_sets entry whose sources and agent destinations may be synced")
     agents_parser.add_argument("--agent", action="append", default=[], help="only sync this frontmatter name; repeat to select several")
     agents_parser.add_argument("--adopt", action="store_true", help="back up same-name destination conflicts before replacing them")
+    agents_parser.add_argument("--former-agent-source", action="append", default=[], metavar="BRIDGE=ABSOLUTE_DIR",
+                               help="migrate matching reviewed native projections from this former source directory; repeat per bridge")
     agents_parser.set_defaults(func=cmd_agents)
 
     repo_parser = subparsers.add_parser("repo", help="manage configured repos")
@@ -1001,6 +1003,12 @@ def cmd_agents(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     # preview write a template. Configure agent paths explicitly before use.
     config = load_config(args.config or default_config_path())
     selectors = tuple(args.repo)
+    former_sources = {}
+    for item in args.former_agent_source:
+        name, separator, path = item.partition('=')
+        if not separator or not name or not path or name in former_sources:
+            raise ConfigError('--former-agent-source requires a unique BRIDGE=ABSOLUTE_DIR')
+        former_sources[name] = Path(path)
     effective, bridges, _ = resolve_agent_sync_request(config, selectors, tuple(args.dest), args.profile)
     source_selectors = tuple(bridge.name for bridge in bridges)
     preflight = _sync_repo_preflight(effective, source_selectors, dry_run=args.dry_run, stdin=sys.stdin, stdout=stdout)
@@ -1014,6 +1022,7 @@ def cmd_agents(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         config, selectors, tuple(args.dest), dry_run=args.dry_run, profile_name=args.profile,
         adopt=args.adopt, backup_root=make_backup_root() if args.adopt else None,
         include_agents=tuple(args.agent),
+        former_agent_sources=former_sources,
     )
     plan = replace(plan, notices=(*preflight.notices, *materialization.notices, *plan.notices),
                    errors=(*preflight.errors, *materialization.errors, *plan.errors))
