@@ -309,7 +309,7 @@ def build_agent_sync_plan(
     for bridge in bridges:
         if not bridge.enabled or bridge.agents_dir is None:
             continue
-        if not bridge.path.exists() and dry_run and bridge.repo and config.sync.clone_if_missing:
+        if not former_agent_sources and not bridge.path.exists() and dry_run and bridge.repo and config.sync.clone_if_missing:
             notices.append(f"PLAN repo {bridge.name}: agent discovery deferred until clone")
             pending_clone = True
             continue
@@ -497,6 +497,19 @@ def build_agent_sync_plan(
                     target = canonical_path(entry)
                     expected = {canonical_path(agent.path): f"{agent.name}.md" for agent in discovered}
                     selected = {canonical_path(agent.path) for agent in agents}
+                    lexical_target = Path(os.path.abspath(entry.parent / entry.readlink()))
+                    if former_agent_sources and any(
+                        lexical_target.is_relative_to(former) or target.is_relative_to(canonical_path(former))
+                        for former in former_agent_sources.values()
+                    ):
+                        selected_former = any(
+                            provider is None and agent.bridge.name in former_agent_sources
+                            and entry.name == f'{agent.name}.md'
+                            and lexical_target == former_agent_sources[agent.bridge.name] / agent.path.name
+                            for agent in agents
+                        )
+                        if not selected_former:
+                            errors.append(f'stale or invalid former-source agent link {entry}: preserve and reconcile manually')
                     if any(bridge.agents_dir is not None and canonical_path(bridge.agents_dir) in target.parents
                            for bridge in bridges) and (expected.get(target) != entry.name or provider == "codex"
                                                        or (provider is not None and target not in selected)):
@@ -505,6 +518,7 @@ def build_agent_sync_plan(
             provider = config.agent_formats.get(destination)
             content = None
             source_digest = None
+            raw_former = None
             if provider:
                 try:
                     overlay = config.agent_overlays.get(destination, {}).get(agent.name)
@@ -542,6 +556,31 @@ def build_agent_sync_plan(
                 action = "skip"
             elif not path.exists() and not path.is_symlink():
                 action = "link"
+            elif former_agent_sources:
+                action = "conflict"
+                former_root = former_agent_sources.get(agent.bridge.name)
+                old_path = former_root / agent.path.name if former_root else None
+                try:
+                    if not adopt or old_path is None or not path.is_symlink():
+                        raise ValueError('expected an explicitly adopted former-source symlink')
+                    link = path.readlink()
+                    link_path = Path(os.path.abspath(path.parent / link))
+                    if link_path != old_path:
+                        raise ValueError('symlink does not point exactly to the former source')
+                    old_bytes = _stable_file_bytes(old_path)
+                    lines = old_bytes.decode('utf-8').splitlines()
+                    if not lines or lines[0] != '---':
+                        raise ValueError('former source lacks frontmatter')
+                    end = lines.index('---', 1)
+                    metadata = _agent_metadata(lines[1:end])
+                    description = metadata.get('description')
+                    if metadata.get('name') != agent.name or not isinstance(description, str) or not description.strip():
+                        raise ValueError('former source role metadata does not match')
+                    raw_former = (old_path, hashlib.sha256(old_bytes).hexdigest())
+                    source_digest = hashlib.sha256(_stable_file_bytes(agent.path)).hexdigest()
+                    action = 'adopt'
+                except (OSError, UnicodeError, ValueError) as exc:
+                    errors.append(f'agent destination {path}: migration cannot adopt: {exc}')
             else:
                 action = "adopt" if adopt else "conflict"
             try:
@@ -558,7 +597,8 @@ def build_agent_sync_plan(
             former = migrations.get(path)
             actions.append(AgentAction(destination, path, agent, action, expected_state, content, source_digest,
                                        previous_bytes, resolved_root, root_identity,
-                                       former[0] if former else None, former[1] if former else None))
+                                       former[0] if former else raw_former[0] if raw_former else None,
+                                       former[1] if former else raw_former[1] if raw_former else None))
         try:
             if canonical_path(root) != resolved_root or _planned_root_identity(root, resolved_root, source_roots, frozenset(source_files)) != root_identity:
                 errors.append(f"agent destination {destination}: root changed during planning: {root}")
@@ -846,6 +886,7 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
     finalized: list[tuple[int, AgentAction, Path, Path]] = []
     created: list[str] = []
     completed: list[Path] = []
+    published: dict[Path, tuple[tuple[object, ...], bytes | None]] = {}
     adoptions = tuple(a for a in plan.actions if a.action in {'adopt', 'refresh'})
     migration_snapshots = dict(plan.migration_snapshots)
     try:
@@ -978,9 +1019,14 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                         parent_fd = os.dup(root_fd)
                         private_name, private_fd = _private_dir(parent_fd, '.aiskillsync-agent-write-')
                     _write_exclusive(private_fd, 'prepared', action.content.encode('utf-8'))
+                    prepared = _entry_at(private_fd, 'prepared')
                     os.link('prepared', action.path.name, src_dir_fd=private_fd, dst_dir_fd=root_fd, follow_symlinks=False)
                     completed.append(action.path)
                     _assert_root(action, root_fd)
+                    if (_entry_at(root_fd, action.path.name) != prepared or
+                            _bytes_at(root_fd, action.path.name) != action.content.encode('utf-8')):
+                        raise ValueError(f'agent destination changed during publication: {action.path}')
+                    published[action.path] = (prepared, action.content.encode('utf-8'))
                     if hashlib.sha256(action.agent.path.read_bytes()).hexdigest() != action.source_digest:
                         raise ValueError(f'agent source changed during apply: {action.agent.path}')
                     if action.former_path is not None and hashlib.sha256(_stable_file_bytes(action.former_path)).hexdigest() != action.former_digest:
@@ -990,6 +1036,10 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                     os.symlink(str(action.agent.path), action.path.name, dir_fd=root_fd)
                     completed.append(action.path)
                     _assert_root(action, root_fd)
+                    state = _entry_at(root_fd, action.path.name)
+                    if state == ('missing',) or state[-1] != str(action.agent.path):
+                        raise ValueError(f'agent destination changed during publication: {action.path}')
+                    published[action.path] = (state, None)
                 if backup is not None:
                     assert private_fd is not None and private_path is not None
                     # Keep receipts incomplete until all destination roots have
@@ -1021,10 +1071,18 @@ def apply_agent_sync_plan(plan: AgentSyncPlan) -> tuple[str, ...]:
                 assert item.root_path is not None
                 if item.root_path in roots:
                     _assert_root(item, roots[item.root_path])
+                    if item.path in published:
+                        state, content = published[item.path]
+                        fd = roots[item.root_path]
+                        if (_entry_at(fd, item.path.name) != state or
+                                (content is not None and _bytes_at(fd, item.path.name) != content)):
+                            raise ValueError(f'agent destination changed during apply: {item.path}')
                     if item.root_path in migration_snapshots and _agent_directory_snapshot(roots[item.root_path]) != migration_snapshots[item.root_path]:
                         raise ValueError(f'agent destination changed during apply: {item.path.parent}')
                 if item.former_path is not None and hashlib.sha256(_stable_file_bytes(item.former_path)).hexdigest() != item.former_digest:
                     raise ValueError(f'former agent source changed during apply: {item.former_path}')
+                if item.source_digest is not None and hashlib.sha256(item.agent.path.read_bytes()).hexdigest() != item.source_digest:
+                    raise ValueError(f'agent source changed during apply: {item.agent.path}')
 
         verify_roots()
         for record in receipts:

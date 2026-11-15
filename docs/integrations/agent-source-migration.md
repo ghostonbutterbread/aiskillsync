@@ -1,19 +1,21 @@
 # Agent source migration integration dossier
 
-- **Status:** feature handoff; independent review pending
+- **Status:** reviewer blockers corrected; independent re-review pending
 - **Owner:** delegated Hermes implementer; parent owns review and integration
 - **Branch / worktree:** `feat/agent-source-migration` / `/home/ryushe/worktrees/aiskillsync-agent-source-migration`
 - **Base commit:** `78b660dc69b10d5e36ed702c5aa50d835b47b6cf`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-11-15
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest immutable recovery checkpoint:** `078b8a9e6a80356177f73d905a863e5bfbc28c13` (implementation; followed by version and dossier handoff commit)
+- **Latest prior immutable recovery checkpoint:** `ba60060d08a3d12875ecfb24110a0282e8ed249c` (this dossier is included in the subsequent correction commit)
 - **Feature implementation commit(s):** `078b8a9e6a80356177f73d905a863e5bfbc28c13`
 - **Inspiration / reference:** explicit request for generic former-source migration; no Hoster state or user config edits authorized.
 
 ## Intent and implemented contract
 
 Support optional validated OMP model overlays and explicit `agents --former-agent-source BRIDGE=ABSOLUTE_DIR` migration. Require matching former source path identity, native provider, filename and role; exact old-source rendering using supplied overlays; and an original marker corresponding to a subset of those overlays. Preserve displaced bytes and receipts. Unknown edits and unrelated stale files block; `--adopt` does not override migration conflicts. Existing default stale-owner behavior is unchanged. Protect configured and former source roots and check snapshot and source races; incomplete applies require manual reconciliation. This is not a transactional filesystem or a concurrency lock.
+
+For unformatted migrations, explicit adoption requires an exact link to the matching regular former source and matching role metadata, with both old and new source bytes tracked and link text backed up. Unselected former-source links block. Migration CLI neither clones nor refreshes any selected source in preview or apply; all source agent directories must exist and configured branch checks must pass. Refresh separately and re-preview. A preview is not a persisted authorization token and does not lock the filesystem.
 
 ## Evidence and review
 
@@ -25,6 +27,13 @@ Support optional validated OMP model overlays and explicit `agents --former-agen
 - **Independent review:** pending, assigned to parent; specifically review source/path race boundaries, stale-owner scans, subset marker verification, exact comparison, backup/incomplete semantics, and Hoster's reviewed file layout against renderer.
 - **Merge/ancestry evidence:** base equals fetched `origin/beta`; no merge or push authorized.
 
+### Five-blocker correction receipts
+
+- Before correction, each new regression was run independently and failed on the intended assertion: raw `--adopt` accepted a local file; real CLI pulled unreviewed source bytes after preview; a missing checkout was planned for cloning; a relative former-source argument cloned before failing; an unselected dangling former link did not block; and a write at `os.link` returned success. An additional raw source-publication race also returned success before correction. All corresponding tests now pass in `tests/test_agent_source_migration.py`.
+- Focused migration suite: 25 passed; agent-refresh suite: 30 passed. Full isolated suite: 312 run, 1 skipped (`OPENCODE_TEST_BIN` not supplied), otherwise passed. Expected simulated rollback diagnostics appear in full-suite output.
+- Isolated package installation and CLI both report 0.1.56. `git diff --check` passes. The full suite includes nonmigration clone/pull and profile tests.
+- Parent must independently review the full corrected branch diff, including exact former-link validation, selected/unselected link scans, preview/apply operator boundary, and publication/receipt race checks. These fixes are not an accepted review or deployment.
+
 ## Blockers and deferred work
 
 - Independent exact-diff review is required before beta integration; parent owns it. Re-run focused and full tests after corrections and perform beta merge preflight.
@@ -35,7 +44,7 @@ Support optional validated OMP model overlays and explicit `agents --former-agen
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/agent-source-migration`
-- **Latest immutable recovery checkpoint / implementation:** `078b8a9e6a80356177f73d905a863e5bfbc28c13`; branch tip also contains a later dossier/version-only handoff commit.
+- **Latest prior immutable recovery checkpoint:** `ba60060d08a3d12875ecfb24110a0282e8ed249c`; this dossier accompanies the subsequent correction commit. Inspect branch tip for its immutable ID.
 - **Exact resume point:** parent independently reviews the full base-to-tip diff, verifies tests and migration fixture against reviewed source content, and decides beta integration; no push or activation has occurred.
 - **Working-tree state:** clean after handoff commit, except ignored Python build/cache artifacts.
 

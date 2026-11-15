@@ -1006,26 +1006,32 @@ def cmd_agents(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     former_sources = {}
     for item in args.former_agent_source:
         name, separator, path = item.partition('=')
-        if not separator or not name or not path or name in former_sources:
+        if not separator or not name or not path or name in former_sources or not Path(path).is_absolute():
             raise ConfigError('--former-agent-source requires a unique BRIDGE=ABSOLUTE_DIR')
         former_sources[name] = Path(path)
     effective, bridges, _ = resolve_agent_sync_request(config, selectors, tuple(args.dest), args.profile)
     source_selectors = tuple(bridge.name for bridge in bridges)
-    preflight = _sync_repo_preflight(effective, source_selectors, dry_run=args.dry_run, stdin=sys.stdin, stdout=stdout)
-    materialization = materialize_repositories_for_sync(
-        effective, source_selectors, dry_run=args.dry_run,
-        skip_clone_bridges=frozenset(preflight.skip_clone_bridges),
-        skip_pull_bridges=frozenset(preflight.skip_pull_bridges),
-        report_skill_changes=False,
-    )
+    source_notices: tuple[str, ...] = ()
+    source_errors: tuple[str, ...] = ()
+    if not former_sources:
+        preflight = _sync_repo_preflight(effective, source_selectors, dry_run=args.dry_run, stdin=sys.stdin, stdout=stdout)
+        materialization = materialize_repositories_for_sync(
+            effective, source_selectors, dry_run=args.dry_run,
+            skip_clone_bridges=frozenset(preflight.skip_clone_bridges),
+            skip_pull_bridges=frozenset(preflight.skip_pull_bridges),
+            report_skill_changes=False,
+        )
+        source_notices = (*preflight.notices, *materialization.notices)
+        source_errors = (*preflight.errors, *materialization.errors)
+    else:
+        source_notices = ('Migration does not clone or pull; fetch and fast-forward sources separately, then re-preview.',)
     plan = build_agent_sync_plan(
         config, selectors, tuple(args.dest), dry_run=args.dry_run, profile_name=args.profile,
         adopt=args.adopt, backup_root=make_backup_root() if args.adopt else None,
         include_agents=tuple(args.agent),
         former_agent_sources=former_sources,
     )
-    plan = replace(plan, notices=(*preflight.notices, *materialization.notices, *plan.notices),
-                   errors=(*preflight.errors, *materialization.errors, *plan.errors))
+    plan = replace(plan, notices=(*source_notices, *plan.notices), errors=(*source_errors, *plan.errors))
     for notice in plan.notices:
         print(notice, file=stdout)
     for error in plan.errors:

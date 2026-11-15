@@ -476,7 +476,14 @@ leaving them active silently.
 For a deliberate source move, `agents --former-agent-source BRIDGE=/absolute/old/agents`
 is a separate explicit migration mode (repeat for different selected bridges).
 First inspect both source directories, existing files and overlays, then run it
-with `--dry-run`. The former directory must exist and not overlap configured
+with `--dry-run`. Migration never clones, fetches, or pulls selected sources,
+even if normal sync is configured to do so. All selected checkouts and agent
+directories must already exist and satisfy configured branch checks before
+preview or apply. If updates are needed, fetch and fast-forward them separately,
+then re-preview. Preview is not a persisted authorization token: keep sources
+stable between preview and apply and re-preview after any change. Ordinary
+non-migration sync retains its configured materialization behavior. The former
+directory must exist and not overlap configured
 sources or destinations. Each old file must bind to the same source filename,
 role name and native provider, and its entire body must equal the former source
 rendered with the explicitly configured overlay. A modified file with unknown
@@ -485,6 +492,11 @@ prior marker checksum, it must match a rendering using a subset of the supplied
 overlay fields. Files that differ in formatting or content need manual review;
 the command does not infer overlays or accept arbitrary edits. Migration backs
 up the exact old bytes using the normal recovery index before replacement.
+For unformatted destinations, `--adopt` permits only an exact symlink to the
+matching regular former-source file with valid matching role metadata; unrelated
+files and links remain conflicts. The backup retains the old link text and the
+source bytes are checked for changes during the operation. Former-source links
+under unselected or stale names also block rather than being silently left active.
 Unrelated stale entries still block, and a subsequent ordinary sync is
 idempotent. Run migration only with consumers stopped and source/destination
 directories stable; filesystem races and partial failure still require manual
