@@ -62,6 +62,22 @@ class DoctorReport:
         return False
 
 
+
+def _is_reserved(path: Path, skills_dir: Path) -> bool:
+    """True when any path component under the skills root starts with "_".
+
+    Underscore-prefixed directories are a repository convention for material
+    that is kept but is not a skill: archives, retained history, batch and run
+    folders. Scanning them as skills reports a missing SKILL.md and blocks the
+    whole sync, and in a categorized layout it projects retired skills as live
+    ones under an "_archive" category.
+    """
+    try:
+        parts = path.relative_to(skills_dir).parts
+    except ValueError:
+        return False
+    return any(part.startswith("_") for part in parts)
+
 def discover_bridges(config: Config) -> tuple[BridgeDiscovery, ...]:
     discoveries: list[BridgeDiscovery] = []
     for bridge in config.bridges:
@@ -82,7 +98,18 @@ def discover_bridges(config: Config) -> tuple[BridgeDiscovery, ...]:
 
         skills: list[Skill] = []
         missing_skill_md: list[Path] = []
-        candidates = (skills_dir.rglob("SKILL.md") if bridge.skill_layout == "categorized" else (child / "SKILL.md" for child in skills_dir.iterdir() if child.is_dir()))
+        if bridge.skill_layout == "categorized":
+            candidates = (
+                skill_md
+                for skill_md in skills_dir.rglob("SKILL.md")
+                if not _is_reserved(skill_md.parent, skills_dir)
+            )
+        else:
+            candidates = (
+                child / "SKILL.md"
+                for child in skills_dir.iterdir()
+                if child.is_dir() and not child.name.startswith("_")
+            )
         for skill_md in sorted(candidates, key=lambda item: str(item)):
             child = skill_md.parent
             if skill_md.is_file():
